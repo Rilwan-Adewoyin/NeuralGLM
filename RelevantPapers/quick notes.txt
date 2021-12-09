@@ -1,36 +1,11 @@
-#Optimization Process 1
-	- Given an estimate for the dispersion learn the mean
-	- Then Given estimates for the mean, estimate the dispersion constants
+- Produce Sample Examples of example of model working on 2D rain data - Australia Rain
 
-#Optimization Porcess 2
-
-
-NOTE:
-From GLMs to NNs and back BOOK
-networks are seen as generalizations of GLMs when choosing deviance losses as objective functions
-
-- deviance function differs for each target distrbution as in https://en.wikipedia.org/wiki/Deviance_(statistics)#_Examples
-
-- 
-
-Bayesian Deep GLM Book
-
-#Optimization Process 4 - Natural Gradient Gaussian Variation: Approximiation of second order interactions with factor Covariance
-	- Not applicable since we are not specifically using a guassian distribution to model our outputs
-	- Natural gradient: A small Euclidian distance between lambda and lamda' does not necesarily mean a small KL divergence between q_lambda(theta) and q_lambda'(theta)
-		# Using Natural gradient methods, one method is mentioned in Bayesian Deep GLM paper
-
-#Optimization Process 5 - VAE approach
-	- Sample parmeter variables
-	- Generate a sample
-	- Then use a loss to get update
-	https://lilianweng.github.io/lil-log/2018/08/12/from-autoencoder-to-beta-vae.html#loss-function-elbo
-	https://towardsdatascience.com/understanding-variational-autoencoders-vaes-f70510919f73
-
-	- Use Lognormal Law to as the KL divergence base distribution
-	- Possible Extensions:
-		#Optimization Process 5.1 - VAE approach but extended to ensure latent space is regularised using the continuous version of the paper you read ages ago where they ensure the latent distribution distributions are not too 	
-close together
+- Ensure it works with 3D data 
+- Enable to Work With Weather Dataset used by TRUNET
+- Add test script
+- Add example of how to run train script
+- Label code correctly 
 
 
-#Optimization Process 6 - Likelihood of true value given predicted distributino
+
+- Add the channel noise adding method to Lorenzo's

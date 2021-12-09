@@ -1,0 +1,7 @@
+Data
+Presentations
+RelevantPapers/*
+
+*__pycache__
+.vscode/*
+Checkpoints/*
