@@ -39,9 +39,10 @@ Evaluation.ipynb
 
 
 # Dependencies
-The dependencies can be installed with ```pip3 install -r requirements.txt```
-```pip3 install git+https://github.com/Rilwan-A/Better_LSTM_PyTorch.git```
-```
+The dependencies can be installed with 
+ ```pip3 install -r requirements.txt
+    pip3 install git+https://github.com/Rilwan-A/Better_LSTM_PyTorch.git
+    cat requirements.txt | xargs -n 1 pip install```
 
 
 
