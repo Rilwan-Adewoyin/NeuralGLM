@@ -13,10 +13,10 @@ from torch.nn.modules.loss import _Loss
 from torch import Tensor
 from typing import Callable, Optional
 import math
+import torchtyping
 
 #TODO: Add to notes: Dropout Inference in Bayesian Neural Networks, page 3, column 2, last paragraph of section 2.3
 
-#TODO: Consider using symmetric JS divergence and assuming each datapoint to be the mean, and have variance=1, or whichever term would reduce it to 
 
 class LogNormalNLLLoss(_Loss):
     __constants__ = ['full', 'eps', 'reduction']
@@ -86,24 +86,29 @@ class LogNormalHurdleNLLLoss(_Loss):
     full: bool
     eps: float
 
-    def __init__(self, *, full: bool = False, eps: float = 1e-6, reduction: str = 'mean', pos_weight=torch.ones([1]) ) -> None:
+    def __init__(self, *, full: bool = False, eps: float = 1e-6, reduction: str = 'mean', pos_weight=1 ) -> None:
         super(LogNormalHurdleNLLLoss, self).__init__(None, None, reduction)
         self.full = full
         self.eps = eps
         self.bce_logits = torch.nn.BCEWithLogitsLoss(reduction='sum')
-        self.bce_probs = torch.nn.BCEWithLogitsLoss(reduction='sum')
-        self.pos_weight = pos_weight
+        self.register_buffer('pos_weight',torch.tensor([pos_weight]) )
+        self.register_buffer('pi',torch.tensor(math.pi) )
+
         #TODO: later add increased weights to improve classification for rainy days (precision)
         
         assert reduction == 'mean'
 
-    def forward(self, input: Tensor, did_rain:Tensor, target: Tensor, var: Tensor, prob: Tensor, **kwargs) -> Tensor:
+    def forward(self, input: Tensor, did_rain:Tensor, target: Tensor, var: Tensor, logit: Tensor, **kwargs) -> Tensor:
         """
             Input : true rain fall
             target: predicted mean
             var: predicted variance
         """
-        # return F.gaussian_nll_loss(input, target, var, full=self.full, eps=self.eps, reduction=self.reduction)
+        if did_rain.dtype != logit.dtype:
+            did_rain = did_rain.to(logit.dtype)
+
+        if input.dtype != target.dtype:
+            input = input.to(target.dtype)
 
         # Check var size
         # If var.size == input.size, the case is heteroscedastic and no further checks are needed.
@@ -142,14 +147,10 @@ class LogNormalHurdleNLLLoss(_Loss):
             var.clamp_(min=self.eps)
             input.clamp_(min=self.eps)
 
-        #  probit / logit / etc loss
-        # did_rain = torch.where( input>0, 1.0, 0.0 )
-        
+        # logit / etc loss
+       
         # Calculate the hurdle burnouilli loss
-        if kwargs.get('use_logits',False):
-            loss_bce = self.bce_logits( prob, did_rain)
-        else:
-            loss_bce = self.bce_probs(prob, did_rain)
+        loss_bce = self.bce_logits( logit, did_rain)
 
         # Calculate the ll-loss
         indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
@@ -158,10 +159,9 @@ class LogNormalHurdleNLLLoss(_Loss):
         target_rainydays = target.view((1,-1))[indices_rainydays]
         var_rainydays = var.view((1,-1))[indices_rainydays]
 
-        # NOTE: input_rainydays is essentially a sample from a lognormal distribution. 
-            #   Therefore we do not have to do the log() operation on input_rainydays
-        # loss_cont = 0.5 * (torch.log(var_rainydays) + (torch.log(input_rainydays) - target_rainydays)**2 / var_rainydays) 
-        loss_cont = 0.5 * (torch.log(var_rainydays) + (input_rainydays - target_rainydays)**2 / var_rainydays)  
+        loss_cont = 0.5 * (torch.log(var_rainydays) + (torch.log(input_rainydays) - target_rainydays)**2 / var_rainydays) \
+                        + torch.log(input_rainydays) + 0.5*torch.log(2*self.pi)
+
             #NOTE(add to papers to write):This initialization with high variance acts as regularizer to smoothen initial loss funciton
         loss_cont = self.pos_weight * loss_cont
         loss_cont = loss_cont.sum()

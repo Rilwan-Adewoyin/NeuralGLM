@@ -1,5 +1,5 @@
 import torch
-from torch import distributions
+from torch.autograd.grad_mode import set_grad_enabled
 from torch.distributions.gamma import Gamma
 from torch.distributions.half_normal import HalfNormal
 from torch.distributions.log_normal import LogNormal
@@ -12,17 +12,16 @@ from scipy import stats
 
 from torch.nn.modules.loss import _Loss
 from torch import Tensor
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 # torch.autograd.set_detect_anomaly(True)
 import numpy as np
 
 from torch.distributions import constraints
 from torch.distributions.transforms import ExpTransform
 from torch.distributions.transformed_distribution import TransformedDistribution
+from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures, StandardScaler, FunctionTransformer, MaxAbsScaler
 
 # Distributions
-
-
 class LogNormalHurdle():
     r"""
     Creates a log-normal distribution parameterized by
@@ -77,8 +76,6 @@ class LogNormalHurdle():
     # def entropy(self):
     #     return self.base_dist.entropy() + self.loc
 
-
-
 #Mean functions
 class Inverse(torch.nn.Module):
     def __init__(self) -> None:
@@ -104,11 +101,9 @@ class Shift(torch.nn.Module):
         x = x + self.shift
         return x
 
-
 MAP_LINK_INVFUNC = {
     'identity': torch.nn.Identity(),
     'shift': Shift,
-    'negative_inverse': lambda val: -torch.pow(val,-1),
     'inverse': Inverse(),
     'relu':torch.nn.ReLU(),
     'relu_inverse':torch.nn.Sequential( torch.nn.ReLU(), Inverse() ),
@@ -146,13 +141,10 @@ MAP_NAME_DISTRIBUTION = {
 
 class GLMMixin:
 
-    def _get_inv_link(self, link_name, **kwargs):
-        if len(kwargs)== 0:
-            invfunc =   MAP_LINK_INVFUNC[link_name]
-        else:
-            invfunc =   MAP_LINK_INVFUNC[link_name](**kwargs)
-            
+    def _get_inv_link(self, link_name):
+        invfunc =   MAP_LINK_INVFUNC[link_name]            
         return invfunc
+
     def check_distribution_mean_link(self, distribution_name, link_name):
         #TODO: implement code that checks if the distribution and link function chosen by a user match
         bool_check = link_name in MAP_DISTRIBUTION_MEANLINKFUNC.get(distribution_name,[])
@@ -166,26 +158,46 @@ class GLMMixin:
     def _get_distribution(self, distribution_name):
         return MAP_NAME_DISTRIBUTION[distribution_name]
     
-    def _get_mean_range(self, distribution_name, standardized):
+    def _get_mean_range(self, distribution_name, scaler=None):
+        
+        if scaler==None:
+            min = 0
+            max = None
+            pass
 
-        if standardized:
-            min = float((-self.scaler_targets.data_min_[0])/(self.scaler_targets.data_max_[0] - self.scaler_targets.data_min_[0]) )
+        elif isinstance(scaler,MinMaxScaler):
+            min = scaler.feature_range[0]
+            max = None
+        
+        elif isinstance(scaler, MaxAbsScaler):
+            min = 0
             max = None
         else:
             raise NotImplementedError
         
         return min, max
         
-    def _get_dispersion_range(self, distribution_name, standardized, **kwargs):
+    def _get_dispersion_range(self, distribution_name, **kwargs):
 
-        if standardized:
-            if distribution_name == "lognormal":
-                min = 0
-                max = None
-            elif distribution_name == "lognormal_hurdle":
-                min = kwargs.get('eps',1e-7)
-                max = None
-        else:
-            raise NotImplementedError
+    
+        if distribution_name == "lognormal":
+            min = kwargs.get('eps',1e-3)
+            max = None
+        elif distribution_name == "lognormal_hurdle":
+            min = kwargs.get('eps',1e-3 )
+            max = None
         
         return min, max
+    
+    def destandardize(self, mean: Union[Tensor, np.ndarray], scaler: Union[MinMaxScaler,StandardScaler] ):
+        
+        if isinstance(scaler, FunctionTransformer):
+            # mean = mean - scaler.
+            mean = scaler.inverse_transform(mean)
+        elif scaler == None:
+            pass
+        
+
+        mean = mean
+
+        return mean
