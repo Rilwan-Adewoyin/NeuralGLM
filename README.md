@@ -38,11 +38,11 @@ This will train a model and save predictions.
 Evaluation.ipynb
 
 
-# Dependencies
-The dependencies can be installed with 
- ```pip3 install -r requirements.txt
+# Setup 
+ ```
+    cat requirements.txt | xargs -n 1 pip install
     pip3 install git+https://github.com/Rilwan-A/Better_LSTM_PyTorch.git
-    cat requirements.txt | xargs -n 1 pip install```
+    ```
 
 
 
