@@ -5,8 +5,8 @@
 - [ ] Write up code for Other Distributions to be tested
 - [ ] ...
 - [ ] Extend work to using more widely used dataset
-    - [ ] Chinese
-    - [ ] Spanish
+    - [ ] TRUNET paper dataset??
+    - [ ] Or rain prediction dataset
 
 
 <p align="right">(<a href="#top">back to top</a>)</p>
