@@ -1,3 +1,4 @@
+from cmath import log
 import torch
 from torch import distributions
 from torch.distributions.gamma import Gamma
@@ -416,14 +417,10 @@ class GammaNLLLoss(_Loss):
     full: bool
     eps: float
 # Define a function to compute a Gamma negative loglikelihood
-    def Gamma_NLL(obs,#observations
+    def Gamma_NLL(y,#observation
                     m, #mean
                     d): #dipersion
-        #initialise S
-        S=-n*(log(gamma(1/d)+(log(d*m)/d)))
-        #itterate through observations
-        for y in obs:
-            S+=log(y)*((1/d)-1)+(y/(d*m))
+        S=-log(d*m)-log(math.gamma(1/d))-(y/(d*m))+log(y)*((1/d)-1)
         return -S
 
     def __init__(self, *, full: bool = False, eps: float = 1e-6, reduction: str = 'mean', pos_weight=1 ) -> None:
@@ -499,7 +496,7 @@ class GammaNLLLoss(_Loss):
         target_rainydays = target.view((1,-1))[indices_rainydays]
         var_rainydays = var.view((1,-1))[indices_rainydays]
 
-        loss_cont =Gamma_NLL(obs=input_rainydays,m=target_rainydays,d=var_rainydays)
+        loss_cont =Gamma_NLL(y=input_rainydays,m=target_rainydays,d=var_rainydays)
 
             #NOTE(add to papers to write):This initialization with high variance acts as regularizer to smoothen initial loss funciton
         loss_cont = self.pos_weight * loss_cont
