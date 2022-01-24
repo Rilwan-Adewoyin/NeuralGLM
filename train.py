@@ -1,3 +1,9 @@
+# python3 train.py --target_distribution_name gamma_hurdle  --gpus 1 --dataset australia_rain --model_name HLSTM --glm_name DGLM --mean_distribution_name normal --mean_link_name relu --dispersion_distribution_name gamma --dispersion_link_name relu --pos_weight 1
+
+# python3 train.py --target_distribution_name lognormal_hurdle  --gpus 1 --dataset australia_rain --model_name HLSTM --glm_name DGLM  --mean_distribution_name normal --mean_link_name relu --dispersion_distribution_name gamma --dispersion_link_name relu --pos_weight 1
+# python3 train.py --target_distribution_name compound_poisson --gpus 1 --dataset australia_rain --model_name HLSTM --glm_name DGLM --mean_distribution_name normal --mean_link_name relu --dispersion_distribution_name gamma --dispersion_link_name relu --pos_weight 1
+
+from distributions import LIST_PVar_Model
 import torch
 from torch.nn import functional as F
 from torch import nn
@@ -29,6 +35,8 @@ if __name__ == '__main__':
     train_parser.add_argument("--dataset", default="australia_rain", choices=["toy","australia_rain"])
     train_parser.add_argument("--model_name", default="HLSTM", choices=["MLP","HLSTM"])
     train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
+    train_parser.add_argument("--max_epochs", default=100, type=int)
+
 
     train_args = train_parser.parse_known_args()[0]
     
@@ -51,9 +59,9 @@ if __name__ == '__main__':
         ds_train, ds_val, ds_test, scaler_features, scaler_targets = ToyDataset.get_dataset( target_func=target_func, **vars(data_args))
     
     elif train_args.dataset == "australia_rain":
-        ds_train, ds_val, ds_test, scaler_features, scaler_targets = AustraliaRainDataset.get_dataset(**vars(data_args))
+        ds_train, ds_val, ds_test, scaler_features, scaler_targets = AustraliaRainDataset.get_dataset(**vars(data_args),
+                                                                        target_distribution_name=glm_args.target_distribution_name )
         data_args.input_shape = ( len( ds_train.datasets[0].features.columns ), )
-
     else:
         raise NotImplementedError
 
@@ -66,8 +74,7 @@ if __name__ == '__main__':
     neural_net_class = MAP_NAME_NEURALMODEL[train_args.model_name]
     neural_net = neural_net_class( input_shape = data_args.input_shape,
                             output_shape = data_args.output_shape,
-                            hurdle_model = "hurdle" in glm_args.target_distribution_name, 
-                            zero_inflated_model = "zero_inflated" in glm_args.target_distribution_name,
+                            p_variable_model = glm_args.target_distribution_name in LIST_PVar_Model, 
                             **vars(model_args) )
 
     # Load GLM Model
@@ -90,8 +97,7 @@ if __name__ == '__main__':
                                              ] ,
                             enable_checkpointing=True,
                             precision=16,
-                            max_epochs=100,
-                            log_every_n_steps=10
+                            max_epochs=train_args.max_epochs
                              )
 
     # Fit the Trainer
@@ -101,5 +107,6 @@ if __name__ == '__main__':
     
     # Test the Trainer
     trainer.test(dataloaders=dl_test, ckpt_path='best')
+
 
 

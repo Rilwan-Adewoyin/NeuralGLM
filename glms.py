@@ -1,5 +1,4 @@
 from typing import Union
-from pytorch_lightning.utilities.types import EPOCH_OUTPUT
 import torch
 from torch.autocast_mode import autocast
 # from torch.optim import lr_scheduler
@@ -15,6 +14,8 @@ from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures, StandardScal
 import torchtyping
 import argparse
 from neural_nets import MAP_NAME_NEURALMODEL
+from pytorch_lightning.utilities.types import EPOCH_OUTPUT
+
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
 
@@ -29,8 +30,10 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
             mean_distribution_name='normal',
             mean_link_name='identity',
             mean_link_func_params={},
+            
             dispersion_distribution_name='gamma',
             dispersion_link_name='negative_inverse',
+          
 
             scaler_features:Union[MinMaxScaler,StandardScaler,str]=None,
             scaler_targets:Union[MinMaxScaler,StandardScaler,str]=None,
@@ -80,15 +83,17 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         self.min_mean_output_standardized, self.max_mean_output_standardized = self._get_mean_range( self.target_distribution_name, self.scaler_targets ) 
         self.min_dispersion_output_standardized, self.max_disperion_output_standardized = self._get_dispersion_range( distribution_name=self.target_distribution_name )
 
-        # Setting on hurdle neural_net / zero-inflated neural_net params
-        if self.neural_net.hurdle_model:
-            self.prob_inverse_link_function = self._get_inv_link('sigmoid')
+        # Setting on hurdle neural_net 
+        if self.neural_net.p_variable_model:
+            self.p_inverse_link_function = self._get_p_inverse_link_function(target_distribution_name)
             
     def forward( self, x ):
         output = self.neural_net(x)
 
         mean = self.mean_inverse_link_function(output['mean'])
         disp = self.dispersion_inverse_link_function(output['disp'])
+        if self.neural_net.p_variable_model:
+            output['p'] = self.p_inverse_link_function(output['logits']) 
           
         mean = mean.clone()
         disp = disp.clone()
@@ -102,9 +107,6 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
     
         output['mean'] = mean
         output['disp'] = disp
-
-        if self.neural_net.hurdle_model:
-                output['prob'] = self.prob_inverse_link_function(output['logits']) 
         
         return output
 
@@ -119,10 +121,10 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
          
         # during initial training steps fix the dispersion term to be within a specific range until stability is reached
     
-        if self.neural_net.hurdle_model:
-            prob = output['prob'].squeeze(-1)  
+        if self.neural_net.p_variable_model:
+            p = output['p'].squeeze(-1)  
             logits = output['logits'].squeeze(-1)     
-            loss, composite_losses = self.loss_fct( target_rain_value, target_rain_bool , pred_mean, pred_disp, logits )
+            loss, composite_losses = self.loss_fct( target_rain_value, target_rain_bool , pred_mean, pred_disp, logit=logits, p=p )
         else:
             loss = self.loss_fct( target_rain_value, pred_mean, pred_disp )
             composite_losses = None
@@ -134,9 +136,9 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
             output =  {'loss':loss, 'pred_mean':pred_mean, 'pred_disp':pred_disp,  
                             'target_rain_bool':target_rain_bool, 'target_rain_value':target_rain_value }
 
-            if self.neural_net.hurdle_model:
+            if self.neural_net.p_variable_model:
                 output['composite_losses'] = composite_losses
-                output['pred_prob'] = prob
+                output['pred_p'] = p
             return output
 
     def training_step(self, batch, batch_idx):
@@ -145,8 +147,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         self.log("loss",output['loss'])
 
         if output.get( 'composite_losses', None):
-            self.log("loss\\bce",output['composite_losses']['loss_bce'])
-            self.log("loss\cont",output['composite_losses']['loss_cont'])
+            self.log("loss\\norain",output['composite_losses']['loss_norain'])
+            self.log("loss\rain",output['composite_losses']['loss_rain'])
 
         return output
     
@@ -154,8 +156,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         output  = self.step(batch, "val")
         self.log("val_loss", output['loss'], prog_bar=True)
         if output.get('composite_losses', None):
-            self.log("val_loss\\bce", output['composite_losses']['loss_bce'], on_step=False, on_epoch=True)
-            self.log("val_loss\cont", output['composite_losses']['loss_cont'], on_step=False, on_epoch=True)
+            self.log("val_loss\\norain", output['composite_losses']['loss_norain'], on_step=False, on_epoch=True)
+            self.log("val_loss\rain", output['composite_losses']['loss_rain'], on_step=False, on_epoch=True)
 
         return output
 
@@ -165,8 +167,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
 
         # Logging the aggregate loss during testing
         self.log("test_loss",output['loss'] )
-        self.log("test_loss\\bce", output['composite_losses']['loss_bce'], on_epoch=True, prog_bar=True )
-        self.log("test_loss\cont",output['composite_losses']['loss_cont'], on_epoch=True ,prog_bar=True )
+        self.log("test_loss\\norain", output['composite_losses']['loss_norain'], on_epoch=True, prog_bar=True )
+        self.log("test_loss\rain",output['composite_losses']['loss_rain'], on_epoch=True ,prog_bar=True )
         
         return output
 
@@ -176,13 +178,15 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         pred_mean = torch.cat( [output['pred_mean'] for output in outputs], dim=0 ).cpu().numpy()
         pred_disp = torch.cat( [output['pred_disp'] for output in outputs], dim=0 ).cpu().numpy()
 
-        if self.neural_net.hurdle_model:
-            pred_prob = torch.cat( [output['pred_prob'] for output in outputs], dim=0 ).cpu().numpy()
+        if self.neural_net.p_variable_model:
+            pred_p = torch.cat( [output['pred_p'] for output in outputs], dim=0 ).cpu().numpy()
+        else:
+            pred_p = None
         
         target_rain_bool = torch.cat( [output['target_rain_bool'] for output in outputs], dim=0 ).cpu().numpy()
         target_rain_value = torch.cat( [output['target_rain_value'] for output in outputs], dim=0 ).cpu().numpy()
         
-        pred_mean = self.destandardize( pred_mean, self.scaler_targets )
+        pred_mean, pred_disp, p = self.destandardize( pred_mean, pred_disp, pred_p ,self.target_distribution_name, self.scaler_targets )
 
         # Split predictions by location
         test_dl = self.trainer.test_dataloaders[0]
@@ -210,8 +214,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
                     'date':date_windows }
             
         
-            if self.neural_net.hurdle_model:
-                data['pred_prob'] = pred_prob[s_idx:e_idx]
+            if self.neural_net.p_variable_model:
+                data['pred_p'] = pred_p[s_idx:e_idx]
 
             dict_location_data[loc] = data
 
@@ -270,7 +274,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         parser.add_argument("--dispersion_distribution_name", default="gamma")
         parser.add_argument("--dispersion_link_name", default="relu",help="name of link function used for mean distribution")
 
-        parser.add_argument("--pos_weight", default=2, help="The relative weight placed on examples where rain did occur when calculating the loss")
+        parser.add_argument("--pos_weight", default=2, type=int ,help="The relative weight placed on examples where rain did occur when calculating the loss")
 
         glm_args = parser.parse_known_args()[0]
         return glm_args

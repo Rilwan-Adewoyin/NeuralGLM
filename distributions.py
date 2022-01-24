@@ -11,6 +11,8 @@ from torch.distributions.transformed_distribution import TransformedDistribution
 from torch.distributions import constraints
 import torch
 
+LIST_PVar_Model = ["lognormal_hurdle","gamma_hurdle","compound_poisson"] #List of models that use the p variable
+
 # Distributions
 class LogNormalHurdle():
     r"""
@@ -42,9 +44,15 @@ class LogNormalHurdle():
     def sample(self,sample_size=(1,)):
         rain_prob = self.bernoulli_dist.sample( sample_size )
 
-        sampled_rain = torch.where(rain_prob==1, self.lognormal_dist.sample( (1,) ), 0  )
+        sampled_rain = torch.where(rain_prob>=0.5, self.lognormal_dist.sample( (1,) ), 0  )
 
         return sampled_rain
+    
+    # @staticmethod
+    # def quick_sample(loc, scale, prob):
+    #     rain_prob = torch.bernoulli( prob )
+
+    #     sampled_rain = torch.log_normal
 
     # @property
     # def loc(self):
@@ -67,21 +75,13 @@ class LogNormalHurdle():
 
 class GammaHurdle():
     r"""
-    Creates a log-normal distribution parameterized by
-    :attr:`loc` and :attr:`scale` where::
+    Creates a Gamma Hurdle distribution parameterized by
+    :attr:`loc` and :attr:`scale` where and :attr:`p` :
 
-        X ~ Normal(loc, scale)
-        Y = exp(X) ~ LogNormal(loc, scale)
+        p ~ Bernoulli( p )
+        Y ~ Gamma( mu, disp) ~
 
-    Example::
-
-        >>> m = LogNormal(torch.tensor([0.0]), torch.tensor([1.0]))
-        >>> m.sample()  # log-normal distributed with mean=0 and stddev=1
-        tensor([ 0.1046])
-
-    Args:
-        loc (float or Tensor): mean of log of distribution
-        scale (float or Tensor): standard deviation of log of the distribution
+    
     """
     arg_constraints = {'mu': constraints.positive, 'disp': constraints.positive, 'prob':constraints.positive}
     support = constraints.positive
@@ -92,13 +92,14 @@ class GammaHurdle():
         self.bernoulli_dist = Bernoulli(prob, validate_args=validate_args)
 
         alpha, beta = self.reparameterize( mu, disp )
+
         self.gamma_dist = LogNormal(alpha, beta, validate_args=validate_args)
 
     def sample(self,sample_size=(1,)):
         
         rain_prob = self.bernoulli_dist.sample( sample_size )
 
-        sampled_rain = torch.where(rain_prob==1, self.gamma_dist.sample( (1,) ), 0  )
+        sampled_rain = torch.where(rain_prob>=0.5, self.gamma_dist.sample( (1,) ), 0  )
 
         return sampled_rain
 
