@@ -15,73 +15,9 @@ from typing import Callable, Optional
 import math
 import torchtyping
 import numpy as np
-from mpmath import *
+#from mpmath import *
 
 #TODO: Add to notes: Dropout Inference in Bayesian Neural Networks, page 3, column 2, last paragraph of section 2.3
-
-
-class LogNormalNLLLoss(_Loss):
-    __constants__ = ['full', 'eps', 'reduction']
-    full: bool
-    eps: float
-
-    def __init__(self, *, full: bool = False, eps: float = 1e-6, reduction: str = 'mean') -> None:
-        super(LogNormalNLLLoss, self).__init__(None, None, reduction)
-        self.full = full
-        self.eps = eps
-        
-
-    def forward(self, input: Tensor, target: Tensor, var: Tensor) -> Tensor:
-        # return F.gaussian_nll_loss(input, target, var, full=self.full, eps=self.eps, reduction=self.reduction)
-
-        # Check var size
-        # If var.size == input.size, the case is heteroscedastic and no further checks are needed.
-        # Otherwise:
-        if var.size() != input.size():
-
-            # If var is one dimension short of input, but the sizes match otherwise, then this is a homoscedastic case.
-            # e.g. input.size = (10, 2, 3), var.size = (10, 2)
-            # -> unsqueeze var so that var.shape = (10, 2, 1)
-            # this is done so that broadcasting can happen in the loss calculation
-            if input.size()[:-1] == var.size():
-                var = torch.unsqueeze(var, -1)
-
-            # This checks if the sizes match up to the final dimension, and the final dimension of var is of size 1.
-            # This is also a homoscedastic case.
-            # e.g. input.size = (10, 2, 3), var.size = (10, 2, 1)
-            elif input.size()[:-1] == var.size()[:-1] and var.size(-1) == 1:  # Heteroscedastic case
-                pass
-
-            # If none of the above pass, then the size of var is incorrect.
-            else:
-                raise ValueError("var is of incorrect size")
-
-        # Check validity of reduction mode
-        if self.reduction != 'none' and self.reduction != 'mean' and self.reduction != 'sum':
-            raise ValueError(self.reduction + " is not valid")
-
-        # Entries of var must be non-negative
-        if torch.any(var < 0):
-            raise ValueError("var has negative entry/entries")
-
-        # Clamp for stability
-        var = var.clone()
-        # input = input.clone()
-        with torch.no_grad():
-            var.clamp_(min=self.eps)
-            # input.clamp_(min=self.eps)
-
-        # Calculate the loss
-        loss = 0.5 * (torch.log(var) + (torch.log(input) - target)**2 / var) 
-        if self.full:
-            loss += 0.5 * math.log(2 * math.pi) + torch.log(input)
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        else:
-            return loss
 
 class LogNormalHurdleNLLLoss(_Loss):
     __constants__ = ['full', 'eps', 'reduction']
@@ -99,55 +35,66 @@ class LogNormalHurdleNLLLoss(_Loss):
         #TODO: later add increased weights to improve classification for rainy days (precision)
         
         assert reduction == 'mean'
+    
+    def lognormal_nll(self, obs, mu, disp ):
 
-    def forward(self, input: Tensor, did_rain:Tensor, target: Tensor, var: Tensor, logit: Tensor, **kwargs) -> Tensor:
+        ll  = -0.5 * (torch.log(disp) + (torch.log(obs) - mu)**2 / disp) 
+                        
+        if self.full:
+            ll += -0.5*torch.log(2*self.pi) - torch.log(obs)
+
+        return -ll
+
+    def forward(self, rain: Tensor, did_rain:Tensor, mean: Tensor, disp: Tensor, logit: Tensor, **kwargs) -> Tensor:
         """
-            Input : true rain fall
-            target: predicted mean
-            var: predicted variance
+            rain : true rain fall
+            did_rain: whether or not it rained
+            mean: predicted mean
+            disp: predicted dispiance
+            logit: predicted prob of rain
         """
         if did_rain.dtype != logit.dtype:
             did_rain = did_rain.to(logit.dtype)
 
-        if input.dtype != target.dtype:
-            input = input.to(target.dtype)
+        if rain.dtype != mean.dtype:
+            rain = rain.to(mean.dtype)
 
-        # Check var size
-        # If var.size == input.size, the case is heteroscedastic and no further checks are needed.
+        # Check disp size
+        # If disp.size == rain.size, the case is heteroscedastic and no further checks are needed.
         # Otherwise:
-        if var.size() != input.size():
+        if disp.size() != rain.size():
 
-            # If var is one dimension short of input, but the sizes match otherwise, then this is a homoscedastic case.
-            # e.g. input.size = (10, 2, 3), var.size = (10, 2)
-            # -> unsqueeze var so that var.shape = (10, 2, 1)
+            # If disp is one dimension short of rain, but the sizes match otherwise, then this is a homoscedastic case.
+            # e.g. rain.size = (10, 2, 3), disp.size = (10, 2)
+            # -> unsqueeze disp so that disp.shape = (10, 2, 1)
             # this is done so that broadcasting can happen in the loss calculation
-            if input.size()[:-1] == var.size():
-                var = torch.unsqueeze(var, -1)
+            if rain.size()[:-1] == disp.size():
+                disp = torch.unsqueeze(disp, -1)
 
-            # This checks if the sizes match up to the final dimension, and the final dimension of var is of size 1.
+            # This checks if the sizes match up to the final dimension, and the final dimension of disp is of size 1.
             # This is also a homoscedastic case.
-            # e.g. input.size = (10, 2, 3), var.size = (10, 2, 1)
-            elif input.size()[:-1] == var.size()[:-1] and var.size(-1) == 1:  # Heteroscedastic case
+            # e.g. rain.size = (10, 2, 3), disp.size = (10, 2, 1)
+            elif rain.size()[:-1] == disp.size()[:-1] and disp.size(-1) == 1:  # Heteroscedastic case
                 pass
 
-            # If none of the above pass, then the size of var is incorrect.
+            # If none of the above pass, then the size of disp is incorrect.
             else:
-                raise ValueError("var is of incorrect size")
+                raise ValueError("disp is of incorrect size")
 
         # Check validity of reduction mode
         if self.reduction != 'none' and self.reduction != 'mean' and self.reduction != 'sum':
             raise ValueError(self.reduction + " is not valid")
 
-        # Entries of var must be non-negative
-        if torch.any(var < 0):
-            raise ValueError("var has negative entry/entries")
+        # Entries of disp must be non-negative
+        if torch.any(disp < 0):
+            raise ValueError("disp has negative entry/entries")
 
         # Clamp for stability
-        var = var.clone()
-        input = input.clone()
+        disp = disp.clone()
+        rain = rain.clone()
         with torch.no_grad():
-            var.clamp_(min=self.eps)
-            input.clamp_(min=self.eps)
+            disp.clamp_(min=self.eps)
+            rain.clamp_(min=self.eps)
 
         # logit / etc loss
        
@@ -157,24 +104,21 @@ class LogNormalHurdleNLLLoss(_Loss):
         # Calculate the ll-loss
         indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
         
-        input_rainydays = input.view((1,-1))[indices_rainydays]
-        target_rainydays = target.view((1,-1))[indices_rainydays]
-        var_rainydays = var.view((1,-1))[indices_rainydays]
+        rain_rainydays = rain.view((1,-1))[indices_rainydays]
+        mean_rainydays = mean.view((1,-1))[indices_rainydays]
+        disp_rainydays = disp.view((1,-1))[indices_rainydays]
 
-        loss_cont = 0.5 * (torch.log(var_rainydays) + (torch.log(input_rainydays) - target_rainydays)**2 / var_rainydays) \
-                        + torch.log(input_rainydays) + 0.5*torch.log(2*self.pi)
+        loss_cont = self.lognormal_nll(rain_rainydays, mean_rainydays, disp_rainydays)
 
-            #NOTE(add to papers to write):This initialization with high variance acts as regularizer to smoothen initial loss funciton
         loss_cont = self.pos_weight * loss_cont
         loss_cont = loss_cont.sum()
 
         if self.reduction == 'mean':
-            loss_bce = loss_bce/input.numel()
-            loss_cont = loss_cont/input.numel()
+            loss_bce = loss_bce/rain.numel()
+            loss_cont = loss_cont/rain.numel()
             loss = loss_bce + loss_cont 
 
         return loss, {'loss_bce':loss_bce.detach() , 'loss_cont':loss_cont.detach()}            
-
 
 #In this version of the loss, the parameters we learn are those of a regular CP model - not the GLM CP model
 class CPNLLLoss(_Loss):
@@ -294,7 +238,6 @@ class CPNLLLoss(_Loss):
 
         return loss, {'loss_bce':loss_bce.detach() , 'loss_cont':loss_cont.detach()}        
 
-
 #In this version, the parameters we learn are those of the CP GLM - mean and dispersion.
 class CPGLMNLLLoss(_Loss):
     __constants__ = ['full', 'eps', 'reduction']
@@ -321,6 +264,7 @@ class CPGLMNLLLoss(_Loss):
     #first define a value used in the CP-GLM loss clalculations
     def W_CP(y,a,var,z):
         return(((y)**(z*a))/((var**(z*(1+a)))*((1/(1+a))**z)*((1/(1+a))**(z*a))*(factorial(z))*(gamma(z*a))))
+    
     def CP_GLM_NLLLoss(a,       #alpha - a Gama dist parameter for both laten variables used in CP
                         rain_in,   
                         rain_out,
@@ -411,81 +355,93 @@ class CPGLMNLLLoss(_Loss):
 
         return loss, {'loss_bce':loss_bce.detach() , 'loss_cont':loss_cont.detach()}
 
-class GammaNLLLoss(_Loss):
+class GammaHurdleNLLLoss(_Loss):
+    
     __constants__ = ['full', 'eps', 'reduction']
-    full: bool
+    full: bool #Often these work to regularise the parameters
     eps: float
-# Define a function to compute a Gamma negative loglikelihood
-    def Gamma_NLL(obs,#observations
-                    m, #mean
-                    d): #dipersion
-        #initialise S
-        S=-n*(log(gamma(1/d)+(log(d*m)/d)))
-        #itterate through observations
-        for y in obs:
-            S+=log(y)*((1/d)-1)+(y/(d*m))
-        return -S
-
-    def __init__(self, *, full: bool = False, eps: float = 1e-6, reduction: str = 'mean', pos_weight=1 ) -> None:
+    
+    def __init__(self, *, full: bool = True, eps: float = 1e-6, reduction: str = 'mean', pos_weight=1 ) -> None:
         super(LogNormalHurdleNLLLoss, self).__init__(None, None, reduction)
         self.full = full
         self.eps = eps
         self.bce_logits = torch.nn.BCEWithLogitsLoss(reduction='sum')
         self.register_buffer('pos_weight',torch.tensor([pos_weight]) )
-        self.register_buffer('pi',torch.tensor(math.pi) )
-
-        #TODO: later add increased weights to improve classification for rainy days (precision)
+        
         
         assert reduction == 'mean'
+    
+    def gamma_nll(self, obs,#observations
+                    mu,     # mean
+                    disp): # dipersion - \alpha^-1 is dispersion term
+        # Uses the Gamma(\mu, \sigma^2) parameterization. Where \mu = \frac{\alpha}{\beta} and \sigma^2 = \frac{1}{\alpha}
+        # original parameteriszation was Gamma( \alpha, \beta )
+        
+        # #initialise S
+        # S=-n*(log(gamma(1/d)+(log(d*m)/d)))
+        # #itterate through observations
+        # for y in obs:
+        #     S+=log(y)*((1/d)-1)+(y/(d*m))
 
-    def forward(self, input: Tensor, did_rain:Tensor, target: Tensor, var: Tensor, logit: Tensor, **kwargs) -> Tensor:
+        alpha = disp.pow(-1)
+        
+        ll = (alpha-1)*torch.log(obs) - mu.pow(-1)*obs*alpha
+        if self.full:
+            ll += alpha*torch.log(alpha) - alpha*torch.log(mu) - torch.lgamma(alpha)
+
+        return -ll
+
+
+    def forward(self, rain: Tensor, did_rain:Tensor, mean: Tensor, disp: Tensor, logit: Tensor, **kwargs) -> Tensor:
         """
-            Input : true rain fall
-            target: predicted mean
-            var: predicted variance
+            rain : true rain fall
+            did_rain: whether or not it rained
+            mean: predicted mean
+            disp: predicted dispersion - note dispersion term is the inverse of the \alpha value from the traditional gamma distribution. 
+            logit: predicted prob of rain
         """
         if did_rain.dtype != logit.dtype:
             did_rain = did_rain.to(logit.dtype)
 
-        if input.dtype != target.dtype:
-            input = input.to(target.dtype)
+        if rain.dtype != mean.dtype:
+            rain = rain.to(mean.dtype)
 
-        # Check var size
-        # If var.size == input.size, the case is heteroscedastic and no further checks are needed.
+        # Check disp size
+        # If disp.size == rain.size, the case is heteroscedastic and no further checks are needed.
         # Otherwise:
-        if var.size() != input.size():
+        if disp.size() != rain.size():
 
-            # If var is one dimension short of input, but the sizes match otherwise, then this is a homoscedastic case.
-            # e.g. input.size = (10, 2, 3), var.size = (10, 2)
-            # -> unsqueeze var so that var.shape = (10, 2, 1)
+            # If disp is one dimension short of rain, but the sizes match otherwise, then this is a homoscedastic case.
+            # e.g. rain.size = (10, 2, 3), disp.size = (10, 2)
+            # -> unsqueeze disp so that disp.shape = (10, 2, 1)
             # this is done so that broadcasting can happen in the loss calculation
-            if input.size()[:-1] == var.size():
-                var = torch.unsqueeze(var, -1)
+            if rain.size()[:-1] == disp.size():
+                disp = torch.unsqueeze(disp, -1)
 
-            # This checks if the sizes match up to the final dimension, and the final dimension of var is of size 1.
+            # This checks if the sizes match up to the final dimension, and the final dimension of disp is of size 1.
             # This is also a homoscedastic case.
-            # e.g. input.size = (10, 2, 3), var.size = (10, 2, 1)
-            elif input.size()[:-1] == var.size()[:-1] and var.size(-1) == 1:  # Heteroscedastic case
+            # e.g. rain.size = (10, 2, 3), disp.size = (10, 2, 1)
+            elif rain.size()[:-1] == disp.size()[:-1] and disp.size(-1) == 1:  # Heteroscedastic case
                 pass
 
-            # If none of the above pass, then the size of var is incorrect.
+            # If none of the above pass, then the size of disp is incorrect.
             else:
-                raise ValueError("var is of incorrect size")
+                raise ValueError("disp is of incorrect size")
 
         # Check validity of reduction mode
         if self.reduction != 'none' and self.reduction != 'mean' and self.reduction != 'sum':
             raise ValueError(self.reduction + " is not valid")
 
-        # Entries of var must be non-negative
-        if torch.any(var < 0):
-            raise ValueError("var has negative entry/entries")
+        # Entries of disp must be non-negative
+        if torch.any(disp < 0):
+            raise ValueError("disp has negative entry/entries")
 
         # Clamp for stability
-        var = var.clone()
-        input = input.clone()
+        disp = disp.clone()
+        rain = rain.clone()
         with torch.no_grad():
-            var.clamp_(min=self.eps)
-            input.clamp_(min=self.eps)
+            disp.clamp_(min=self.eps)
+            rain.clamp_(min=self.eps)
 
         # logit / etc loss
        
@@ -495,37 +451,194 @@ class GammaNLLLoss(_Loss):
         # Calculate the ll-loss
         indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
         
-        input_rainydays = input.view((1,-1))[indices_rainydays]
-        target_rainydays = target.view((1,-1))[indices_rainydays]
-        var_rainydays = var.view((1,-1))[indices_rainydays]
+        rain_rainydays = rain.view((1,-1))[indices_rainydays]
+        mean_rainydays = mean.view((1,-1))[indices_rainydays]
+        disp_rainydays = disp.view((1,-1))[indices_rainydays]
 
-        loss_cont =Gamma_NLL(obs=input_rainydays,m=target_rainydays,d=var_rainydays)
+        # continuous loss 
+        loss_cont = self.gamma_nll(obs=rain_rainydays, mu=mean_rainydays, disp=disp_rainydays)
 
-            #NOTE(add to papers to write):This initialization with high variance acts as regularizer to smoothen initial loss funciton
         loss_cont = self.pos_weight * loss_cont
         loss_cont = loss_cont.sum()
 
         if self.reduction == 'mean':
-            loss_bce = loss_bce/input.numel()
-            loss_cont = loss_cont/input.numel()
+            loss_bce = loss_bce/rain.numel()
+            loss_cont = loss_cont/rain.numel()
             loss = loss_bce + loss_cont 
 
         return loss, {'loss_bce':loss_bce.detach() , 'loss_cont':loss_cont.detach()}            
 
+class CompoundPoissonGammaNLLLoss(_Loss):
+    """The CompoundPoisson Distribution.
+
+        The underlying distribution is Gamma distribution
+
+        We use the Tweedie parameterization that uses a mean and variance concept.
+        
+        In the Normal CompoundPoissonGamma distribution:
+            - there are three parameters: \alpha, \beta, \lambda
+            - X is distributed Gamma(\alpha, \beta) - \alpha is the shape, \beta is the rate
+            - N is distributed Poisson(\lambda)
+            
+        In the Tweedie parameterisation:
+            - there are three parameters \mu, \theta, \p
+                :\mu = \lambda \times \frac{\alpha}{\beta} : can be interpreted as the mean of Y (our target variable)
+                :\theta = \lambda * \alpha * (1-\alpha) * \beta^(-2) * \mu^-p : can be interpreted as dispersion
+                :\p = \alpha \times (1-\alpha)^-1 and 1<p<2 : can be interpreted as the 'distribution parameters'
+            - statistics:
+                :
+            - note: if \mu ==0, then \lambda ==0
+                :  \mu is independent of \lambda 
+                : \p interpretation
+                    : can be interpreted as p = -( q + 1)
+                    : as q tends to 1, \lambda tends to 0?? (i.e. Poisson(0) so the minium amount of samples is chosen)
+                    : as q tends to 0, then \alpha (shape of gamm distributions) tends to 0, meaning mode and mean of tend to 0
+
+    """
+    __constants__ = ['full', 'eps', 'reduction']
+    full: bool
+    eps: float
+
+    def __init__(self, *, full: bool = True, eps: float = 1e-6, reduction: str = 'mean', pos_weight=1 ) -> None:
+        super(CompoundPoissonGammaNLLLoss, self).__init__(None, None, reduction)
+        self.full = full
+        self.eps = eps
+        self.bce_logits = torch.nn.BCEWithLogitsLoss(reduction='sum')
+        self.register_buffer('pos_weight',torch.tensor([pos_weight]) )
+        self.register_buffer('pi',torch.tensor(math.pi) )
+
+        
+        # Check validity of reduction mode
+        if self.reduction != 'none' and self.reduction != 'mean' and self.reduction != 'sum':
+            raise ValueError(self.reduction + " is not valid")
+        
+    
+    def nll_zero(self, mu, disp, p ):
+        #L=0
+        ll = -mu.power(2-p) * disp.power(-1) * (2-p).power(-1)
+        return -ll
+
+    def nll_positive(self, obs, mu, disp, p ):
+        #L>0
+        # using approximation from https://www.hindawi.com/journals/jps/2018/1012647/
+        
+        beta = 2-p / (p-1)  #from the gamm distribution
+        L = obs
+        theta = disp
+
+         
+
+        ll = L * (1-p).pow(-1) * (mu).pow(p-1) 
+        ll += mu.pow(2-p) * (2-p).pow(-1)
+        
+        jmax = L.pow(2-p) * (2-p).pow(-1) * theta.pow(-1)
+        logW_jmax = jmax * ( torch.log(L**beta) + 
+                            torch.log((p-1)**beta) + 
+                            -torch.log( (theta)**(1-beta) ) + 
+                            -torch.log( (2-p) ) + 
+                            (1+beta) - beta*torch.log(beta) + 
+                            - (1-beta)*(2-p)*torch.log(L) +
+                            - (1-beta)*-torch.log(2-beta) +
+                            - (1-beta)*-torch.log(theta)
+                        )
+                            
+        logW_jmax += -torch.log(jmax)
+
+        if self.full:
+            logW_jmax += -torch.log(2*self.pi) - 0.5*torch.log(beta)
+        
+        ll +=  logW_jmax
+
+        return -ll 
 
 
-MAP_DISTRIBUTION_LOSS = {
 
-    'poisson': PoissonNLLLoss, #s(log_input, target, log_input=self.log_input, full=self.full,eps=self.eps, reduction=self.reduction)
-    'normal': GaussianNLLLoss, # (input, target, var, full=self.full, eps=self.eps, reduction=self.reduction)
-    'lognormal': LogNormalNLLLoss,
-    'lognormal_hurdle':LogNormalHurdleNLLLoss,
-    'compound_poisson':CPNLLLoss,
-    'CP_GLM':CPGLMNLLLoss,
-    'gamma':GammaNLLLoss
-}
+    def forward(self, rain: Tensor, did_rain:Tensor, mean: Tensor, disp: Tensor, p: Tensor, **kwargs) -> Tensor:
 
-class LossMixin:
+        
+        # Ensuring correct dtypes 
+        if did_rain.dtype != p.dtype:
+            did_rain = did_rain.to(p.dtype)
 
-    def _get_loglikelihood_loss_func(self,  distribution_name ):
-        return MAP_DISTRIBUTION_LOSS[distribution_name]
+        if rain.dtype != mean.dtype:
+            rain = rain.to(mean.dtype)
+
+        # Check disp size
+            # If disp.size == rain.size, the case is heteroscedastic and no further checks are needed.
+            # Otherwise the case is homoscedastic and we need to expand the last dimension
+        if disp.size() != rain.size():
+
+            # If disp is one dimension smaller than rain, but the sizes match otherwise, then this is a homoscedastic case.
+            # e.g. rain.size = (10, 2, 3), disp.size = (10, 2)
+            # -> unsqueeze disp so that disp.shape = (10, 2, 1)
+            # this is done so that broadcasting can happen in the loss calculation
+            if rain.size()[:-1] == disp.size():
+                disp = torch.unsqueeze(disp, -1)
+
+            # This checks if the sizes match up to the final dimension, and the final dimension of disp is of size 1.
+            # This is also a homoscedastic case.
+            # e.g. rain.size = (10, 2, 3), disp.size = (10, 2, 1)
+            elif rain.size()[:-1] == disp.size()[:-1] and disp.size(-1) == 1:  # Heteroscedastic case
+                pass
+
+            # If none of the above pass, then the size of disp is incorrect.
+            else:
+                raise ValueError("disp is of incorrect size")
+
+        # Entries of disp must be non-negative
+        if torch.any(disp < 0):
+            raise ValueError("disp has negative entry/entries") 
+
+        # Clamping for stability
+        disp = disp.clone()
+        # rain = rain.clone()
+        p = p.clone()
+        with torch.no_grad():
+            disp.clamp_(min=self.eps)
+            # rain.clamp_(min=self.eps)  
+            p.clamp_(min=1+self.eps, max=2-self.eps)
+
+        # Gathering indices to seperate days of no rain from days of rain
+        count = did_rain.numel()
+        indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
+        indices_non_rainydays = torch.where(did_rain.view( (1,-1))==0)
+
+        
+        # Gathering seperate tensors for days with and without rain
+        rain_rainydays = rain.view((1,-1))[indices_rainydays]
+        mean_rainydays = mean.view((1,-1))[indices_rainydays]
+        disp_rainydays = disp.view((1,-1))[indices_rainydays]
+        p_rainydays = p.view((1,-1))[indices_rainydays]
+
+        rain_non_rainydays = rain.view((1,-1))[indices_non_rainydays]
+        mean_non_rainydays = mean.view((1,-1))[indices_non_rainydays]
+        disp_non_rainydays = disp.view((1,-1))[indices_non_rainydays]
+        p_non_rainydays = p.view((1,-1))[indices_non_rainydays]
+
+        # Calculating loss for rainy days
+
+
+        # Calculating loss for non rainy days
+
+        mu = rain_non_rainydays
+        y0 = mean_non_rainydays
+        theta = disp_non_rainydays 
+        p = p_non_rainydays
+
+        loss_nonrainyday = mu**(2-p) / ( (2-p)*disp )
+
+        loss_nonrainyday = self.nll_zero()
+        
+        loss_rainyday = self.nll_positive()
+        
+        if self.reudction == 'mean':
+            loss = (loss_non_rainy.sum() + loss_rain.sum() ) / count
+
+        
+        return loss, {'loss_norain':loss_bce.detach() , 'loss_rain':loss_cont.detach()}
+
+
+
+
+
+    

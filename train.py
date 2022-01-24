@@ -63,16 +63,19 @@ if __name__ == '__main__':
     dl_test = DataLoader(ds_train, 1280, shuffle=False, num_workers=4, drop_last=False)
     
     # Load Neural Model to be used
-    model = MAP_NAME_NEURALMODEL[train_args.model_name]( data_args.input_shape, data_args.output_shape,
-        hurdle_model = "hurdle" in glm_args.target_distribution_name, 
-        zero_inflated_model = "zero_inflated" in glm_args.target_distribution_name,
-        **vars(model_args) )
+    neural_net_class = MAP_NAME_NEURALMODEL[train_args.model_name]
+    neural_net = neural_net_class( input_shape = data_args.input_shape,
+                            output_shape = data_args.output_shape,
+                            hurdle_model = "hurdle" in glm_args.target_distribution_name, 
+                            zero_inflated_model = "zero_inflated" in glm_args.target_distribution_name,
+                            **vars(model_args) )
 
     # Load GLM Model
-    glm = MAP_NAME_GLM[train_args.glm_name](neural_net=model, 
-                                                    scaler_targets=scaler_targets,
-                                                    scaler_features=scaler_features,
-                                                    **vars(glm_args))
+    glm_class = MAP_NAME_GLM[train_args.glm_name]
+    glm = glm_class(neural_net=neural_net, 
+                        scaler_targets=scaler_targets,
+                        scaler_features=scaler_features,
+                        **vars(glm_args))
 
     # Define the trainer
     trainer = pl.Trainer(   gpus=train_args.gpus,

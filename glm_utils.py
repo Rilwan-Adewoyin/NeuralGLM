@@ -17,64 +17,16 @@ from typing import Callable, Optional, Union
 import numpy as np
 
 from torch.distributions import constraints
+from torch.distributions.distribution import Distribution
 from torch.distributions.transforms import ExpTransform
 from torch.distributions.transformed_distribution import TransformedDistribution
 from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures, StandardScaler, FunctionTransformer, MaxAbsScaler
+from loss_utils import *
 
-# Distributions
-class LogNormalHurdle():
-    r"""
-    Creates a log-normal distribution parameterized by
-    :attr:`loc` and :attr:`scale` where::
+import distributions
 
-        X ~ Normal(loc, scale)
-        Y = exp(X) ~ LogNormal(loc, scale)
+from typing import List
 
-    Example::
-
-        >>> m = LogNormal(torch.tensor([0.0]), torch.tensor([1.0]))
-        >>> m.sample()  # log-normal distributed with mean=0 and stddev=1
-        tensor([ 0.1046])
-
-    Args:
-        loc (float or Tensor): mean of log of distribution
-        scale (float or Tensor): standard deviation of log of the distribution
-    """
-    arg_constraints = {'loc': constraints.real, 'scale': constraints.positive}
-    support = constraints.positive
-    has_rsample = True
-
-    def __init__(self, loc, scale, prob, validate_args=None):
-        
-        self.bernoulli_dist = Bernoulli(prob, validate_args=validate_args)
-        self.lognormal_dist = LogNormal(loc, scale, validate_args=validate_args)
-
-    def sample(self,sample_size=(1,)):
-        raise NotImplementedError # Check method below allows different mean and var to suppled to each varaible
-        rain_prob = self.bernoulli_dist.sample( sample_size )
-
-        sampled_rain = torch.where(rain_prob==1, self.lognormal_dist.sample( (1,) ), 0  )
-
-        return sampled_rain
-
-    # @property
-    # def loc(self):
-    #     return self.base_dist.loc
-
-    # @property
-    # def scale(self):
-    #     return self.base_dist.scale
-
-    # @property
-    # def mean(self):
-    #     return (self.loc + self.scale.pow(2) / 2).exp()
-
-    # @property
-    # def variance(self):
-    #     return (self.scale.pow(2).exp() - 1) * (2 * self.loc + self.scale.pow(2)).exp()
-
-    # def entropy(self):
-    #     return self.base_dist.entropy() + self.loc
 
 #Mean functions
 class Inverse(torch.nn.Module):
@@ -136,8 +88,22 @@ MAP_NAME_DISTRIBUTION = {
     'lognormal': LogNormal ,
     'gamma': Gamma,
     'HalfNormal': HalfNormal,
-    'lognormal_hurdle':LogNormalHurdle,
+    'gamma_hurdle':distributions.GammaHurdle,
+    'lognormal_hurdle':distributions.LogNormalHurdle,
+    'compound_poisson':distributions.CompoundPoisson
 }
+
+MAP_DISTRIBUTION_LOSS = {
+
+    'poisson': PoissonNLLLoss, #s(log_input, target, log_input=self.log_input, full=self.full,eps=self.eps, reduction=self.reduction)
+    'normal': GaussianNLLLoss, # (input, target, var, full=self.full, eps=self.eps, reduction=self.reduction)
+    'lognormal_hurdle':LogNormalHurdleNLLLoss,
+    'compound_poisson':CPNLLLoss,
+    'CP_GLM':CPGLMNLLLoss,
+    'compound_poisson':CompoundPoissonGammaNLLLoss,
+    'gamma_hurdle':GammaHurdleNLLLoss
+}
+
 
 class GLMMixin:
 
@@ -155,7 +121,15 @@ class GLMMixin:
         bool_check = link_name in MAP_DISTRIBUTION_DISPERSIONLINKFUNC.get(distribution_name,[])
         return bool_check
 
-    def _get_distribution(self, distribution_name):
+    def _get_distribution(self, distribution_name:str) -> Distribution:
+        """Retrieves the distribution class when passed the name of the distributino
+
+        Args:
+            distribution_name ([type]): [description]
+
+        Returns:
+            [type]: [description]
+        """
         return MAP_NAME_DISTRIBUTION[distribution_name]
     
     def _get_mean_range(self, distribution_name, scaler=None):
@@ -201,3 +175,6 @@ class GLMMixin:
         mean = mean
 
         return mean
+
+    def _get_loglikelihood_loss_func(self,  distribution_name ):
+        return MAP_DISTRIBUTION_LOSS[distribution_name]

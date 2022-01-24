@@ -8,7 +8,6 @@ from glm_utils import GLMMixin
 from transformers.optimization import Adafactor, AdafactorSchedule
 import pickle
 import os
-from loss_utils import LossMixin
 from better_lstm import LSTM
 import einops
 import pytorch_lightning as pl
@@ -19,7 +18,7 @@ from neural_nets import MAP_NAME_NEURALMODEL
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
 
-class NeuralDGLM(pl.LightningModule, GLMMixin, LossMixin ):
+class NeuralDGLM(pl.LightningModule, GLMMixin ):
     
     glm_type = "DGLM"
 
@@ -52,10 +51,10 @@ class NeuralDGLM(pl.LightningModule, GLMMixin, LossMixin ):
 
         # Target Distribution
         self.target_distribution_name = target_distribution_name
-        self.target_distribution = self._get_distribution( self.target_distribution_name )
-        self.loss_fct = self._get_loglikelihood_loss_func( target_distribution_name )( pos_weight=pos_weight ) 
+        self.target_distribution = self._get_distribution( self.target_distribution_name ) #target distribution
+        self.loss_fct = self._get_loglikelihood_loss_func( target_distribution_name )( pos_weight=pos_weight )  #loss function
 
-            # Checking compatibility of target distribution and link functions
+        # Checking compatibility of target distribution and link functions
         assert self.check_distribution_mean_link(target_distribution_name, mean_link_name), "Incompatible mean link function chosen for target distribution"
         assert self.check_distribution_dispersion_link(target_distribution_name, dispersion_link_name),  "Incompatible dispersion link function chosen for target distribution"
 
@@ -263,7 +262,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin, LossMixin ):
     def parse_glm_args(parent_parser):
         parser = argparse.ArgumentParser(
             parents=[parent_parser], add_help=True, allow_abbrev=False)
-        parser.add_argument("--target_distribution_name", default="lognormal_hurdle")
+        parser.add_argument("--target_distribution_name", default="compound_poisson")
 
         parser.add_argument("--mean_distribution_name", default="normal")
         parser.add_argument("--mean_link_name", default="identity",help="name of link function used for mean distribution")
@@ -271,7 +270,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin, LossMixin ):
         parser.add_argument("--dispersion_distribution_name", default="gamma")
         parser.add_argument("--dispersion_link_name", default="relu",help="name of link function used for mean distribution")
 
-        parser.add_argument("--pos_weight", default=2, help="The relative weight placed on positive examples when calculating the loss")
+        parser.add_argument("--pos_weight", default=2, help="The relative weight placed on examples where rain did occur when calculating the loss")
 
         glm_args = parser.parse_known_args()[0]
         return glm_args
