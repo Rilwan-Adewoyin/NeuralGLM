@@ -4,7 +4,6 @@ from torch.optim import lr_scheduler
 from torch import nn
 from glm_utils import GLMMixin
 from transformers.optimization import Adafactor, AdafactorSchedule
-from loss_utils import LossMixin
 from better_lstm import LSTM
 import einops
 import pytorch_lightning as pl
@@ -57,7 +56,7 @@ class HLSTM(nn.Module):
                     output_shape=(2,),
                     hidden_dim:int=32,
                     num_layers:int=2, 
-                    hurdle_model:bool=False,
+                    p_variable_model:bool=False,
                     zero_inflated_model:bool=False ) -> None:
         """[summary]
 
@@ -66,14 +65,14 @@ class HLSTM(nn.Module):
             output_shape (tuple, optional): [description]. Defaults to (2,).
             hidden_dim (int, optional): [Dimensions of hidden layers in model]. Defaults to 32.
             num_layers (int, optional): [Number of layers in neural network]. Defaults to 2.
-            hurdle_model (bool, optional): [Whether or not we use a hurdle type model]. Defaults to False.
+            p_variable_model (bool, optional): [Whether or not we use a p variable type model]. Defaults to False.
             zero_inflated_model (bool, optional): [Whether or not we use a zero inflated model]. Defaults to False.
         """
         super().__init__()
 
         self.input_shape = input_shape
         self.output_shape = output_shape
-        self.hurdle_model = hurdle_model
+        self.p_variable_model = p_variable_model
         self.zero_inflated_model = zero_inflated_model
 
         self.upscale = nn.Sequential( nn.Linear( input_shape[0], hidden_dim, bias=False ), nn.SELU() )
@@ -86,11 +85,11 @@ class HLSTM(nn.Module):
             ExtractLSTMOutputFeatures()
         )
 
-        if hurdle_model:
-            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim*2, hidden_dim, bias=False), nn.SELU(), nn.Linear(hidden_dim, *self.output_shape, bias=False) )
+        if self.p_variable_model:
+            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim*2, hidden_dim, bias=False), nn.SELU(), nn.Linear(hidden_dim, *self.output_shape, bias=False), nn.SELU() )
 
-        self.outp_mean = nn.Sequential( nn.Linear(hidden_dim*2, *self.output_shape, bias=False),  nn.ReLU())
-        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim*2, *self.output_shape, bias=False), nn.ReLU())
+        self.outp_mean = nn.Sequential( nn.Linear(hidden_dim*2, *self.output_shape, bias=False) )
+        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim*2, *self.output_shape, bias=False) )
         
     def forward(self, x, standardized_output=True):
         x = self.upscale(x)
@@ -98,11 +97,11 @@ class HLSTM(nn.Module):
 
         output = {}
 
-        if self.hurdle_model:
-            output['logits'] = self.outp_logitsrain(h)
-
         output['mean'] = self.outp_mean(h)
         output['disp'] = self.outp_dispersion(h)
+
+        if self.p_variable_model:
+            output['logits'] = self.outp_logitsrain(h)
         
         return output
     

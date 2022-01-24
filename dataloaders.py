@@ -352,15 +352,16 @@ class AustraliaRainDataset(Dataset):
             premade_dsets = pd.DataFrame( columns=['path','start_date','end_date','locations','lookback','train_val_test_split','target_distribution_name'] )
 
         # Query for if existing dataset is made
-        query_res = premade_dsets.query( f"start_date == {start_date.replace('-','')} | end_date == {end_date.replace('-','')} | \
-                locations == {ujson.dumps(locations)} | \
-                lookback == {str(lookback)} | \
-                train_val_test_split == {ujson.dumps(train_val_test_split)} | \
+        query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' | \
+                locations == '{ujson.dumps(locations)}' and \
+                lookback == {str(lookback)} and \
+                train_val_test_split == '{ujson.dumps(train_val_test_split)}' and \
                 target_distribution_name == '{target_distribution_name}'" )
 
         if len(query_res)!=0:
+
             with open(query_res['path'][0], "rb") as f:
-                pkl_dset_dict = pickle.load( f ) #{ 'scaler_features':scaler_features, 'scaler_targets':scaler_targets }
+                pkl_dset_dict = pickle.load( f ) 
             
             concat_dset_train = pkl_dset_dict['concat_dset_train']
             concat_dset_val = pkl_dset_dict['concat_dset_val']
@@ -449,8 +450,10 @@ class AustraliaRainDataset(Dataset):
             # Scaling Targets
                 # Scaling methodology is determined by the target distribution. 
                 # Note, specific distributions such as lognormal can not be scaled to 0,1 since they are not invariant under affine transformation 
-            if target_distribution_name not in ['lognormal_hurdle','lognormal']:
+            if target_distribution_name in ["gamma_hurdle","compound_poisson"]:
                 scaler_targets = MinMaxScaler(feature_range=(0,1))
+            elif target_distribution_name in ['lognormal_hurdle']:
+                scaler_targets = MaxAbsScaler()
             else:
                 scaler_targets = None
 
@@ -461,11 +464,10 @@ class AustraliaRainDataset(Dataset):
             target_transform = pd.DataFrame(data = targets_raw )
             
             if scaler_targets is not None:
-                target_transform[numerical_target] = scaler_targets.fit_transform(targets_raw[numerical_target])
-
-                _ = targets_raw[numerical_target][ (targets_raw[numerical_target].index >=pd.Timestamp(start_date)) &
-                                                        (targets_raw[numerical_target].index <= end_train_date) ]
+                _ = targets_raw[numerical_target][ (targets_raw[numerical_target].index >= pd.Timestamp(start_date) ) &
+                                                      (targets_raw[numerical_target].index <= end_train_date) ]
                 scaler_targets.fit( _ )
+
                 target_transform[numerical_target] = scaler_targets.transform(targets_raw[numerical_target])
 
             # replace "Yes","No" with binary
