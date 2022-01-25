@@ -1,0 +1,96 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            "justMyCode": false,
+            
+        },
+
+        {
+            "name": "Python: Gamma Hurdle",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            
+            "args": [
+                "--gpus","1",
+                "--dataset","australia_rain",
+                "--model_name","HLSTM",
+                "--glm_name","DGLM",
+                "--max_epochs", "150",
+
+                "--target_distribution_name","gamma_hurdle",
+                "--mean_distribution_name","normal",
+                "--mean_link_name","relu",
+                "--dispersion_distribution_name","gamma",
+                "--dispersion_link_name","relu",
+                "--pos_weight","1"
+            ],
+            
+        },
+
+        {
+            "name": "Python: Compound Poisson",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            
+            "args": [
+                
+                "--gpus","1",
+                "dataset","australia_rain",
+                "model_name","HLSTM",
+                "glm_name","DGLM",
+                "--max_epochs", "13",
+
+
+                "--target_distribution_name","compound_poisson",
+                "--mean_distribution_name","normal",
+                "--mean_link_name","relu",
+                "--dispersion_distribution_name","gamma",
+                "--dispersion_link_name","relu",
+                "--pos_weight","1"                
+                ],
+            
+        },
+
+        {
+            "name": "Python: LogNormal Hurdle",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            
+            "args": [
+                "--gpus","1",
+                "dataset","australia_rain",
+                "model_name","HLSTM",
+                "glm_name","DGLM",
+                "--max_epochs", "120",
+
+
+                "--target_distribution_name","lognormal_hurdle",
+                "--mean_distribution_name","normal",
+                "--mean_link_name","relu",
+                "--dispersion_distribution_name","gamma",
+                "--dispersion_link_name","relu",
+                "--pos_weight","1"
+            ],
+            
+        },
+    ]
+}
