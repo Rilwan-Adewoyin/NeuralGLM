@@ -3,5 +3,5 @@ Presentations
 RelevantPapers/*
 
 *__pycache__
-.vscode/*
+.vscode/settings*
 Checkpoints/*

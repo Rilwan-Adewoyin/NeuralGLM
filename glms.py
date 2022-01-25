@@ -124,7 +124,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         if self.neural_net.p_variable_model:
             p = output['p'].squeeze(-1)  
             logits = output['logits'].squeeze(-1)     
-            loss, composite_losses = self.loss_fct( target_rain_value, target_rain_bool , pred_mean, pred_disp, logit=logits, p=p )
+            loss, composite_losses = self.loss_fct( target_rain_value, target_rain_bool , pred_mean, pred_disp, logits=logits, p=p )
         else:
             loss = self.loss_fct( target_rain_value, pred_mean, pred_disp )
             composite_losses = None
