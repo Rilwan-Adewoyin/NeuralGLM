@@ -45,7 +45,7 @@ Evaluation.ipynb
     cat requirements.txt | xargs -n 1 pip install
     pip3 install git+https://github.com/Rilwan-A/Better_LSTM_PyTorch.git
     ```
- Get Australian Rain Dataset from https://www.kaggle.com/jsphyg/weather-dataset-rattle-package/download
+ Get Australian Rain Dataset from https://www.kaggle.com/filhypedeeplearning/australia-rain-tomorrow-88-accuracy/data
  Save it in the following path: Data/australia_rain/weatherAUS.csv relative to where this repository has been cloned
 
 
