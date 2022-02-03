@@ -41,7 +41,7 @@
         },
 
         {
-            "name": "Python: Compound Poisson",
+            "name": "Python: Compound Poisson v2",
             "type": "python",
             "request": "launch",
             "program": "${file}",
@@ -56,17 +56,106 @@
                 "glm_name","DGLM",
                 "--max_epochs", "13",
 
+                "--target_distribution_name","compound_poisson",
+                "--mean_distribution_name","normal",
+                "--mean_link_name","relu",
+                "--dispersion_distribution_name","gamma",
+                "--dispersion_link_name","relu_inverse",
+                "--pos_weight","1",
+
+                "--cp_version","2",
+                "--max_j","24"                
+                
+                ],
+            
+        },
+
+        {
+            "name": "Python: Compound Poisson v3",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            
+            "args": [
+                
+                "--gpus","1",
+                "dataset","australia_rain",
+                "model_name","HLSTM",
+                "glm_name","DGLM",
+                "--max_epochs", "13",
 
                 "--target_distribution_name","compound_poisson",
                 "--mean_distribution_name","normal",
                 "--mean_link_name","relu",
                 "--dispersion_distribution_name","gamma",
-                "--dispersion_link_name","relu",
-                "--pos_weight","1"                
+                "--dispersion_link_name","relu_inverse",
+                "--pos_weight","1",
+
+                "--cp_version","3",
+                "--max_j","24"                
+                
                 ],
             
         },
 
+        {
+            "name": "Python: Compound Poisson v4",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            
+            "args": [
+                
+                "--gpus","1",
+                "dataset","australia_rain",
+                "model_name","HLSTM",
+                "glm_name","DGLM",
+                "--max_epochs", "13",
+
+                "--target_distribution_name","compound_poisson",
+                "--mean_distribution_name","normal",
+                "--mean_link_name","relu",
+                "--dispersion_distribution_name","gamma",
+                "--dispersion_link_name","relu_inverse",
+                "--pos_weight","1",
+
+                "--cp_version","4",
+                "--j_window_size","3"
+                
+                ],            
+        },
+        {
+            "name": "Python: Compound Poisson v5",
+            "type": "python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "cwd": "${fileDirname}",
+            
+            "args": [
+                
+                "--gpus","1",
+                "dataset","australia_rain",
+                "model_name","HLSTM",
+                "glm_name","DGLM",
+                "--max_epochs", "13",
+
+                "--target_distribution_name","compound_poisson",
+                "--mean_distribution_name","normal",
+                "--mean_link_name","relu",
+                "--dispersion_distribution_name","gamma",
+                "--dispersion_link_name","relu_inverse",
+                "--pos_weight","1",
+
+                "--cp_version","5",
+                "--j_window_size","3"
+                
+                ],            
+        },
         {
             "name": "Python: LogNormal Hurdle",
             "type": "python",

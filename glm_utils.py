@@ -164,7 +164,7 @@ class GLMMixin:
         
         elif distribution_name == "compound_poisson":
             min = kwargs.get('eps',1e-2 )
-            max = None
+            max = 75
         
         return min, max
     

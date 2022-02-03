@@ -55,7 +55,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         # Target Distribution
         self.target_distribution_name = target_distribution_name
         self.target_distribution = self._get_distribution( self.target_distribution_name ) #target distribution
-        self.loss_fct = self._get_loglikelihood_loss_func( target_distribution_name )( pos_weight=pos_weight )  #loss function
+        self.loss_fct = self._get_loglikelihood_loss_func( target_distribution_name )( pos_weight=pos_weight, **kwargs )  #loss function
 
         # Checking compatibility of target distribution and link functions
         assert self.check_distribution_mean_link(target_distribution_name, mean_link_name), "Incompatible mean link function chosen for target distribution"
@@ -147,7 +147,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         self.log("loss",output['loss'])
 
         if output.get( 'composite_losses', None):
-            self.log("loss\\norain",output['composite_losses']['loss_norain'])
+            self.log("loss\norain",output['composite_losses']['loss_norain'])
             self.log("loss\rain",output['composite_losses']['loss_rain'])
 
         return output
@@ -156,7 +156,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         output  = self.step(batch, "val")
         self.log("val_loss", output['loss'], prog_bar=True)
         if output.get('composite_losses', None):
-            self.log("val_loss\\norain", output['composite_losses']['loss_norain'], on_step=False, on_epoch=True)
+            self.log("val_loss\norain", output['composite_losses']['loss_norain'], on_step=False, on_epoch=True)
             self.log("val_loss\rain", output['composite_losses']['loss_rain'], on_step=False, on_epoch=True)
 
         return output
@@ -166,9 +166,9 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         output = self.step(batch, "test")
 
         # Logging the aggregate loss during testing
-        self.log("test_loss",output['loss'] )
-        self.log("test_loss\\norain", output['composite_losses']['loss_norain'], on_epoch=True, prog_bar=True )
-        self.log("test_loss\rain",output['composite_losses']['loss_rain'], on_epoch=True ,prog_bar=True )
+        self.log("test_loss", output['loss'])
+        self.log("test_loss\norain", output['composite_losses']['loss_norain'], on_epoch=True, prog_bar=True)
+        self.log("test_loss\rain", output['composite_losses']['loss_rain'], on_epoch=True, prog_bar=True)
         
         return output
 
@@ -275,6 +275,11 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         parser.add_argument("--dispersion_link_name", default="relu",help="name of link function used for mean distribution")
 
         parser.add_argument("--pos_weight", default=2, type=int ,help="The relative weight placed on examples where rain did occur when calculating the loss")
+
+        # Compound Poisson arguments
+        parser.add_argument('--cp_version', default=None, type=int)
+        parser.add_argument('--max_j', default=None, type=int)
+        parser.add_argument('--j_window_size',default=None, type=int)
 
         glm_args = parser.parse_known_args()[0]
         return glm_args
