@@ -13,40 +13,6 @@ import argparse
 from torch.nn import Parameter
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
-
-class MLP(nn.Module):
-
-    model_type = "MLP"
-
-    def __init__(self, input_shape=(6,), output_shape=(1,), dropout=0.0 ,**kwargs ):
-        super().__init__()
-
-        raise NotImplementedError
-        self.input_shape = input_shape
-        self.output_shape = output_shape
-        self.dropout = dropout
-        
-        self.encoder = nn.Sequential(nn.Linear( *self.input_shape, 32), 
-                                nn.SELU() ,
-                                nn.Linear(32, 16),
-                                nn.SELU() ) 
-
-        self.outp_mean = nn.Linear(16,*output_shape)
-        self.outp_dispersion =  nn.Linear(16, *self.output_shape)
-
-    def forward(self, x):
-        h = self.encoder(x)
-        pred_mean = self.outp_mean(h)
-        pred_dispersion = self.outp_dispersion(h)
-        return pred_mean, pred_dispersion
-
-    @staticmethod
-    def parse_model_args(parent_parser):
-        parser = argparse.ArgumentParser(
-            parents=[parent_parser], add_help=True, allow_abbrev=False)
-        model_args = parser.parse_known_args()[0]
-        return model_args
-
 class HLSTM(nn.Module):
     
     model_type = "HLSTM"
@@ -137,6 +103,5 @@ class ExtractLSTMOutputFeatures(nn.Module):
         return out
     
 MAP_NAME_NEURALMODEL = {
-    'MLP': MLP,
     'HLSTM': HLSTM
 }

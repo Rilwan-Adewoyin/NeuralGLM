@@ -126,15 +126,15 @@ class GLMMixin:
         
         # Range based on modelling
         if distribution_name == "gamma_hurdle" and scaler:
-            min = scaler.transform([[0.5]])[0][0]
+            min = scaler.transform([[0.0]])[0][0]
             max = None
 
         elif distribution_name == "compound_poisson" and scaler:
-            min = scaler.transform([[0.5]])[0][0]
+            min = scaler.transform([[0.0]])[0][0]
             max = None
         
         elif distribution_name == "lognormal_hurdle" and scaler:
-            min = scaler.transform([[0]])[0][0]
+            min = scaler.transform([[0.0]])[0][0]
             max = None
 
         # Range based on Scaler used to make dataset
@@ -168,7 +168,8 @@ class GLMMixin:
         
         return min, max
     
-    def destandardize(self, mean: Union[Tensor, np.ndarray], disp, 
+    
+    def destandardize( self, mean: Union[Tensor, np.ndarray], disp, 
                             p,
                             target_distribution_name, 
                             scaler: Union[MinMaxScaler,StandardScaler,MaxAbsScaler] ):
@@ -189,7 +190,7 @@ class GLMMixin:
         """
 
         if target_distribution_name == "gamma_hurdle":
-            mean = scaler.inverse_transform(mean)
+            mean = mean*scaler.scale_[0]    
             disp = disp
 
         elif target_distribution_name == "lognormal_hurdle":
@@ -197,8 +198,8 @@ class GLMMixin:
             disp = disp
                 
         elif target_distribution_name == "compound_poisson":
-            mean = scaler.inverse_transform(mean)
-            disp = disp * scaler.scale_[0]**(2-p)
+            mean = mean * scaler.scale_[0]
+            disp = disp *(scaler.scale_[0]**(2-p))
         
         else:
             raise NotImplementedError("We do not have rules for destandardizing this type of distribution")

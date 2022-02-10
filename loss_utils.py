@@ -121,6 +121,24 @@ class LogNormalHurdleNLLLoss(_Loss):
 
         return loss, {'loss_norain':loss_norain.detach() , 'loss_rain':loss_rain.detach()}            
 
+    def prediction_metrics(self, rain, did_rain, mean, disp, logits, **kwargs):
+
+        pred_rain_bool = torch.where( logits>=0.5, 1, 0)
+        pred_acc = torch.mean( pred_rain_bool==did_rain )
+        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum()
+
+        indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
+        pred_mse = torch.nn.functional.mse_loss(
+            mean.view((1,-1))[indices_rainydays],
+            rain.view((1,-1))[indices_rainydays]
+        ) #MSE on days it did rain
+        
+
+        pred_metrics = {'pred_acc': pred_acc,
+                        'pred_rec':pred_rec,
+                            'pred_mse': pred_mse }
+        return pred_metrics
+
 class GammaHurdleNLLLoss(_Loss):
     """Gamma distribution model with an Exponetial Dispersion parameterization.
         To model rainfall y
@@ -161,7 +179,6 @@ class GammaHurdleNLLLoss(_Loss):
             ll += alpha*torch.log(alpha) - alpha*torch.log(mu) - torch.lgamma(alpha)
 
         return -ll
-
 
     def forward(self, rain: Tensor, did_rain:Tensor, mean: Tensor, disp: Tensor, logits: Tensor, **kwargs) -> Tensor:
         """
@@ -241,6 +258,25 @@ class GammaHurdleNLLLoss(_Loss):
 
         return loss, {'loss_norain':loss_norain.detach() , 'loss_rain':loss_rain.detach()}            
 
+    def prediction_metrics(self, rain, did_rain, mean, disp, logits, **kwargs):
+
+        
+        pred_rain_bool = torch.where( logits>=0.5, 1, 0)
+        pred_acc = torch.mean(  torch.where( pred_rain_bool==did_rain, 1, 0.0) )
+        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum() if did_rain.sum()>0 else 1.0
+
+        indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
+        pred_mse = torch.nn.functional.mse_loss(
+            mean.view((1,-1))[indices_rainydays],
+            rain.view((1,-1))[indices_rainydays]
+        ) #MSE on days it did rain
+        
+
+        pred_metrics = {'pred_acc': pred_acc.detach(),
+                            'pred_rec': pred_rec.detach(),
+                            'pred_mse': pred_mse.detach(),
+                             }
+        return pred_metrics
 class CompoundPoissonGammaNLLLoss(_Loss):
     """The CompoundPoisson Distribution.
 
@@ -275,27 +311,27 @@ class CompoundPoissonGammaNLLLoss(_Loss):
     def __init__(self, *, full: bool = True, eps: float = 1e-6, reduction: str = 'mean', pos_weight=1, **kwargs ) -> None:
         super(CompoundPoissonGammaNLLLoss, self).__init__(None, None, reduction)
         self.full = full
-        self.eps = eps
+        self.eps = torch.finfo(torch.float16).eps
         self.bce_logits = torch.nn.BCEWithLogitsLoss(reduction='sum')
         self.register_buffer('pos_weight',torch.tensor([pos_weight]) )
         self.register_buffer('pi',torch.tensor(math.pi) )
+        self.register_buffer('e',torch.tensor(math.e) )
 
 
         self.cp_version = kwargs.get('cp_version',2)
 
         if self.cp_version in [2,3]:
             self.max_j = kwargs.get('max_j', 5)
-            self.register_buffer('j', torch.arange(1, self.max_j+1, 1, dtype=torch.float, requires_grad=False) )
+            self.register_buffer('j', torch.arange(1, self.max_j+1, 1, dtype=torch.float, requires_grad=False).unsqueeze(-1) )
 
         elif self.cp_version in [4,5]:
             self.j_window_size = kwargs.get('j_window_size', 5)
-            self.register_buffer('j_window', torch.arange(start=-self.j_window_size, end=self.j_window_size, step=1, dtype=torch.float, requires_grad=False) )
+            self.register_buffer('j_window', torch.arange(start=-self.j_window_size, end=self.j_window_size, step=1, dtype=torch.float, requires_grad=False).unsqueeze(-1) )
         
         # Check validity of reduction mode
         if self.reduction not in  ['none','mean','sum']:
             raise ValueError(self.reduction + " is not valid")
         
-    
     def nll_zero(self, mu, disp, p ):
         #L=0
         ll = -mu.pow(2-p) * disp.pow(-1) * (2-p).pow(-1)
@@ -305,76 +341,99 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         #L>0
         # using approximation from https://www.hindawi.com/journals/jps/2018/1012647/
         
+        mu = mu.clone()
+        with torch.no_grad():
+            mu.clamp_(min=self.eps)
+
         lambda_ = l = mu.pow(2-p) / ( disp * (2-p) )
         alpha = a = (2-p) / (p-1)  #from the gamm distribution
         beta = b = disp*(p-1)*mu.pow(p-1)
         L = obs
         theta = disp
+        pi = self.pi
+        e = self.e
         
-        #---------------- Version 1 -using Wmax as the loss
-        C = L*(1-p).pow(-1)*(mu).pow(-p+1) - mu.pow(2-p)*(2-p).pow(-1)
-    
+        C = L*mu.pow(1-p)*(1-p).pow(-1) - mu.pow(2-p)*(2-p).pow(-1)
+        C *=  theta.pow(-1)
 
         #------------- Version 2 - using 0<j<=48 
         if self.cp_version == 2:
             j = self.j
-            
-            W = l.pow(j) * (b*L).pow(j*a) * torch.exp(-l) \
-                *( (j+1)*torch.log(j+1) - (j+1) + 0.5*torch.log(2*self.pi/(j+1))).pow(-1) \
-                *( j*a*torch.log(j*a) - (j*a) + 0.5*torch.log(2*self.pi/(j*a)) ).pow(-1)
-                # * ( torch.jit._builtins.math.factorial(j)  ).pow(-1) \
+                       
 
+            A = torch.log(L.pow(-1))
+            #  stirling approx of GammaFunc is inaccurate for GammaFunc<1; the approx goes negative while the true value is positive
+            # This leads to an error later on when we use log transform.
+                    
+            #Therefore we used the improved GammaFunc approximation proposed by Gosper
+                # This approximates x! better for x between 0 and 1
+            Wj = L.pow(j*a) * (p-1).pow(-a*j) * theta.pow(-j*(1+a)) * (2-p).pow(-j) \
+                    *((2*j+1/3)*pi).pow(-0.5) * (j/e).pow(-j) \
+                    *((2*j*a+1/3)*pi).pow(-0.5) * ((j*a)/e).pow(-j*a) 
+        
             # summing from 1 to 48
-            W = W.sum(dim=-1)
-
-            ll = torch.log(W) + C
-
+            B = Wj.sum(dim=0)
+            B = torch.log(B)
+            
+            ll = A + B + C
 
         #------------- Version 3 - using 0<j<=48 and jensens inequality to convert log(sum(Wj)) to sum(log(Wj))
         # Calculate jmax. Then calculate a range around j an duse this
         elif self.cp_version == 3:
             j=self.j
-            logW = j*torch.log(l) + j*a*torch.log(b*L) - l - torch.lgamma( j+1 ) - torch.lgamma( j*b )
-            #summing from 1 to 48
-            logW = logW.sum(dim=-1)
+            A = torch.log(L.pow(-1))
 
-            ll = logW + C
+            logW = (j*a)*torch.log(L) + (-a*j)*torch.log(p-1) + (-j*(1+a))*torch.log(theta) + -j*torch.log(2-p) + -torch.lgamma(j+1) + -torch.lgamma(j*a)
+            
+            #summing from 1 to 48
+            B = logW.sum(dim=0)
+
+            ll = A + B + C
             
         #------------- Version 4 - Use a window around J* and stirling approximation
         elif self.cp_version == 4:
 
             with torch.no_grad():
+                #jmax is currently calculated using the Stirling formulation. instead use
+                #  the onas method to create an estimation for the value of jmax then in 
+                # paper state that this approximation holds significantly beeter for low x
                 jmax = L.pow(2-p) * (2-p).pow(-1) * theta.pow(-1)
                 jmax = jmax.expand( (-1, -1 , (self.j_window*2) + 1) ) #expanding
-                j = jmax + self.j_window
+                j = jmax + self.j_window # This is a range of j for each index
 
 
-            W = l.pow(j) * (b*L).pow(j*a) * torch.exp(-l) \
-                *( (j+1)*torch.log(j+1) - (j+1) + 0.5*torch.log(2*self.pi/(j+1))).pow(-1) \
-                *( j*a*torch.log(j*a) - (j*a) + 0.5*torch.log(2*self.pi/(j*a)) ).pow(-1)
-                # * ( torch.jit._builtins.math.factorial(j)  ).pow(-1) \
+            A = torch.log(L.pow(-1))
+
+
+            #Therefore we used the improved GammaFunc approximation proposed by Gosper
+            Wj = L.pow(j*a) * (p-1).pow(-a*j) * theta.pow(-j*(1+a)) * (2-p).pow(-j) \
+                    *((2*j+1/3)*pi).pow(-0.5) * (j/e).pow(-j) \
+                    *((2*j*a+1/3)*pi).pow(-0.5) * ((j*a)/e).pow(-j*a) 
+
+            # summing over j
+            Wj = torch.where( j>1, Wj, 0 ) #maybe should j>0
+            #NOTE: if a particular instane has less j>1 then it will be wieghted less
+            # in the future may need to change this 
             
-            #summing over range of j
-            W = W.sum(dim=-1)
-
-            ll = torch.log(W) + C
+            B = Wj.sum(dim=0)
+            B = torch.log(B)
+            
+            ll = A + B + C
             
         #------------- Version 5 - Use a window around J*  and jensens inequality to conver log(sum(Wj)) to sum(log(Wj))
         elif self.cp_version == 5:
             
+            A = torch.log(L.pow(-1))
+
             with torch.no_grad():
                 jmax = L.pow(2-p) * (2-p).pow(-1) * theta.pow(-1)
                 jmax = jmax.expand( (-1, -1 , (self.j_window*2) + 1) ) #expanding
-                j = jmax + self.j_window
+                j = jmax + self.j_window # This is a range of j for each index
 
-            C = L*(1-p).pow(-1)*(mu).pow(-p+1) - mu.pow(2-p)*(2-p).pow(-1)
-            
-            logW = j*torch.log(l) + j*a*torch.log(b*L) - l - torch.lgamma( j+1 ) - torch.lgamma( j*b )
+            logW = (j*a)*torch.log(L) + (-a*j)*torch.log(p-1) + (-j*(1+a))*torch.log(theta) + -j*torch.log(2-p) + -torch.lgamma(j+1) - torch.lgamma(j*a)            #summing from 1 to 48
+            B = logW.sum(dim=0)
 
-            #summing from 1 to 48
-            logW = logW.sum(dim=-1)
-
-            ll = logW + C
+            ll = A + B + C
 
         return -ll 
 
@@ -424,8 +483,8 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
         # Gathering indices to seperate days of no rain from days of rain
         count = did_rain.numel()
-        indices_rainydays = torch.where(did_rain.view( (1,-1))>0.5)
-        indices_non_rainydays = torch.where(did_rain.view( (1,-1))<=0.5)
+        indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
+        indices_non_rainydays = torch.where(did_rain.view( (1,-1))==0)
 
         
         # Gathering seperate tensors for days with and without rain
@@ -445,6 +504,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         # Calculating loss for rainy days
         loss_rain = self.nll_positive(obs= rain_rainydays, mu=mean_rainydays, disp=disp_rainydays, p=p_rainydays)
         
+
         loss_rain = self.pos_weight * loss_rain
         loss_rain = loss_rain.sum()
         loss_norain = loss_norain.sum()
@@ -457,3 +517,27 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             loss = loss_rain + loss_norain
                     
         return loss, {'loss_norain':loss_norain.detach() , 'loss_rain':loss_rain.detach()}
+
+    def prediction_metrics(self, rain, did_rain, mean, disp, p, **kwargs):
+        
+    
+        #NOTE: Here we are explicitly stating that rain under 0.05 means it did not rain
+        pred_rain_bool = torch.where( mean>0, 1, 0)
+        pred_acc = torch.mean(  torch.where( pred_rain_bool==did_rain, 1.0, 0.0) )
+        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum()  if did_rain.sum()>0 else 1
+       
+        
+        indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
+
+        # Note: we unscale the value prior to caluclating mse to allow for comparison between models
+        pred_mse = torch.nn.functional.mse_loss(
+            mean.view((1,-1))[indices_rainydays],
+            rain.view((1,-1))[indices_rainydays]
+        ) #MSE on days it did rain
+
+        
+        pred_metrics = {'pred_acc': pred_acc.detach(),
+                            'pred_rec': pred_rec.detach(),
+                            'pred_mse': pred_mse.detach(),
+                             }
+        return pred_metrics

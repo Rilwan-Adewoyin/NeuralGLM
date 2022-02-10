@@ -113,28 +113,36 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
     def step(self, batch, step_name ):
         
         inp, target = batch
-        target_rain_bool, target_rain_value = torch.unbind(target,-1)
+        target_did_rain, target_rain_value = torch.unbind(target,-1)
 
         output  = self.forward(inp)
         pred_mean = output['mean']
         pred_disp = output['disp']  
          
-        # during initial training steps fix the dispersion term to be within a specific range until stability is reached
-    
+        
         if self.neural_net.p_variable_model:
             p = output['p'].squeeze(-1)  
             logits = output['logits'].squeeze(-1)     
-            loss, composite_losses = self.loss_fct( target_rain_value, target_rain_bool , pred_mean, pred_disp, logits=logits, p=p )
+            loss, composite_losses = self.loss_fct( target_rain_value, target_did_rain , pred_mean, pred_disp, logits=logits, p=p )
+
+            pred_mean_unstd, pred_disp_unstd, _ = self.destandardize( pred_mean.detach(), pred_disp.detach(),
+                                                     p ,self.target_distribution_name, self.scaler_targets )
+            rain_unstd = self.destandardize( target_rain_value, pred_disp, p ,self.target_distribution_name,
+                                                 self.scaler_targets )[0]
+            pred_metrics = self.loss_fct.prediction_metrics(rain_unstd, target_did_rain, pred_mean_unstd,
+                                                             pred_disp_unstd, logits=logits, p=p)
+
         else:
             loss = self.loss_fct( target_rain_value, pred_mean, pred_disp )
             composite_losses = None
+            pred_metrics = None
 
         if step_name in ['train','val']:
-            return {'loss':loss, 'composite_losses':composite_losses}
+            return {'loss':loss, 'composite_losses':composite_losses, 'pred_metrics':pred_metrics }
 
         elif step_name in ['test']:
             output =  {'loss':loss, 'pred_mean':pred_mean, 'pred_disp':pred_disp,  
-                            'target_rain_bool':target_rain_bool, 'target_rain_value':target_rain_value }
+                            'target_did_rain':target_did_rain, 'target_rain_value':target_rain_value, 'pred_metrics':pred_metrics }
 
             if self.neural_net.p_variable_model:
                 output['composite_losses'] = composite_losses
@@ -147,17 +155,28 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         self.log("loss",output['loss'])
 
         if output.get( 'composite_losses', None):
-            self.log("loss\norain",output['composite_losses']['loss_norain'])
-            self.log("loss\rain",output['composite_losses']['loss_rain'])
+            self.log(r"loss\norain",output['composite_losses']['loss_norain'])
+            self.log(r"loss\rain",output['composite_losses']['loss_rain'])
+        
+        if output.get( 'pred_metrics', None):
+            self.log(r"train_metric\acc",output['pred_metrics']['pred_acc'],  on_step=False, on_epoch=True )
+            self.log(r"train_metric\recall",output['pred_metrics']['pred_rec'], on_step=False, on_epoch=True )
+            self.log("train_metric\pred_mse",output['pred_metrics']['pred_mse'],  on_step=False, on_epoch=True )
 
         return output
     
     def validation_step(self, batch, batch_idx):
         output  = self.step(batch, "val")
         self.log("val_loss", output['loss'], prog_bar=True)
+
         if output.get('composite_losses', None):
-            self.log("val_loss\norain", output['composite_losses']['loss_norain'], on_step=False, on_epoch=True)
-            self.log("val_loss\rain", output['composite_losses']['loss_rain'], on_step=False, on_epoch=True)
+            self.log(r"val_loss\norain", output['composite_losses']['loss_norain'], on_step=False, on_epoch=True)
+            self.log(r"val_loss\rain", output['composite_losses']['loss_rain'], on_step=False, on_epoch=True)
+
+        if output.get( 'pred_metrics', None):
+            self.log(r"val_metric\acc",output['pred_metrics']['pred_acc'] , on_step=False, on_epoch=True)
+            self.log(r"val_metric\recall",output['pred_metrics']['pred_rec'] , on_step=False, on_epoch=True)
+            self.log("val_metric\pred_mse",output['pred_metrics']['pred_mse'] , on_step=False, on_epoch=True)
 
         return output
 
@@ -167,8 +186,15 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
 
         # Logging the aggregate loss during testing
         self.log("test_loss", output['loss'])
-        self.log("test_loss\norain", output['composite_losses']['loss_norain'], on_epoch=True, prog_bar=True)
-        self.log("test_loss\rain", output['composite_losses']['loss_rain'], on_epoch=True, prog_bar=True)
+
+        if output.get('composite_losses', None):
+            self.log("test_loss\norain", output['composite_losses']['loss_norain'], on_epoch=True, prog_bar=True)
+            self.log("test_loss\rain", output['composite_losses']['loss_rain'], on_epoch=True, prog_bar=True)
+
+        if output.get( 'pred_metrics', None):
+            self.log(r"test_metric\acc",output['pred_metrics']['pred_acc'] , on_step=False, on_epoch=True)
+            self.log(r"test_metric\recall",output['pred_metrics']['pred_rec'] , on_step=False, on_epoch=True)
+            self.log("test_metric\mse",output['pred_metrics']['pred_mse'] , on_step=False, on_epoch=True)
         
         return output
 
@@ -183,7 +209,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
         else:
             pred_p = None
         
-        target_rain_bool = torch.cat( [output['target_rain_bool'] for output in outputs], dim=0 ).cpu().numpy()
+        target_did_rain = torch.cat( [output['target_did_rain'] for output in outputs], dim=0 ).cpu().numpy()
         target_rain_value = torch.cat( [output['target_rain_value'] for output in outputs], dim=0 ).cpu().numpy()
         
         pred_mean, pred_disp, p = self.destandardize( pred_mean, pred_disp, pred_p ,self.target_distribution_name, self.scaler_targets )
@@ -209,7 +235,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin ):
 
             data = {'pred_mean':pred_mean[s_idx:e_idx],
                     'pred_disp':pred_disp[s_idx:e_idx],
-                    'target_rain_bool':target_rain_bool[s_idx:e_idx],
+                    'target_did_rain':target_did_rain[s_idx:e_idx],
                     'target_rain_value':target_rain_value[s_idx:e_idx],
                     'date':date_windows }
             
