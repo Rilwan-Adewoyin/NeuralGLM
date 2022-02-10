@@ -48,30 +48,6 @@ class LogNormalHurdle():
 
         return sampled_rain
     
-    # @staticmethod
-    # def quick_sample(loc, scale, prob):
-    #     rain_prob = torch.bernoulli( prob )
-
-    #     sampled_rain = torch.log_normal
-
-    # @property
-    # def loc(self):
-    #     return self.base_dist.loc
-
-    # @property
-    # def scale(self):
-    #     return self.base_dist.scale
-
-    # @property
-    # def mean(self):
-    #     return (self.loc + self.scale.pow(2) / 2).exp()
-
-    # @property
-    # def variance(self):
-    #     return (self.scale.pow(2).exp() - 1) * (2 * self.loc + self.scale.pow(2)).exp()
-
-    # def entropy(self):
-    #     return self.base_dist.entropy() + self.loc
 
 class GammaHurdle():
     r"""
@@ -111,25 +87,6 @@ class GammaHurdle():
 
         return alpha, beta
 
-    # @property
-    # def loc(self):
-    #     return self.base_dist.loc
-
-    # @property
-    # def scale(self):
-    #     return self.base_dist.scale
-
-    # @property
-    # def mean(self):
-    #     return (self.loc + self.scale.pow(2) / 2).exp()
-
-    # @property
-    # def variance(self):
-    #     return (self.scale.pow(2).exp() - 1) * (2 * self.loc + self.scale.pow(2)).exp()
-
-    # def entropy(self):
-    #     return self.base_dist.entropy() + self.loc
-
 class CompoundPoisson():
 
     arg_constraints = {'loc': constraints.real, 'scale': constraints.positive}
@@ -161,3 +118,5 @@ class CompoundPoisson():
         beta = (2-p)/(p-1)
 
         return lambda_, alpha, beta
+    
+    

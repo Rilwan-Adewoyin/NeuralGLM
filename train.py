@@ -86,11 +86,11 @@ if __name__ == '__main__':
 
     # Define the trainer
     trainer = pl.Trainer(   gpus=train_args.gpus,
-                            default_root_dir = f"Checkpoints/{train_args.dataset}/{train_args.glm_name}_{train_args.model_name}",
+                            default_root_dir = f"Checkpoints/{train_args.glm_name}_{train_args.model_name}_{glm_args.target_distribution_name}",
                             callbacks =[EarlyStopping(monitor="val_loss", patience=3),
                                             ModelCheckpoint(
                                                 monitor="val_loss",
-                                                filename='{epoch}-{step}-{val_loss:.4f}',
+                                                filename='{epoch}-{step}-{val_loss:.4f}-{val_metric\pred_mse:.4f}',
                                                 save_last=True,
                                                 auto_insert_metric_name=True,
                                                 save_top_k=2)

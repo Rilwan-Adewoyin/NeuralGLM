@@ -451,7 +451,7 @@ class AustraliaRainDataset(Dataset):
                 # Scaling methodology is determined by the target distribution. 
                 # Note, specific distributions such as lognormal can not be scaled to 0,1 since they are not invariant under affine transformation 
             if target_distribution_name in ["gamma_hurdle","compound_poisson"]:
-                scaler_targets = MinMaxScaler(feature_range=(0,1))
+                scaler_targets = MaxAbsScaler()
             elif target_distribution_name in ['lognormal_hurdle']:
                 scaler_targets = MaxAbsScaler()
             else:
