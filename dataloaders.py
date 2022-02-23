@@ -322,7 +322,9 @@ class AustraliaRainDataset(Dataset):
     def get_dataset(start_date:str="2008-12-01", end_date:str="2021-07-03",
                     locations=['Albury'], lookback=6,
                     train_val_test_split:list = [0.6,0.2,0.2],
-                    target_distribution_name:str="lognormal_hurdle", **kwargs ) -> Tuple:
+                    target_distribution_name:str="lognormal_hurdle", 
+                    target_range=(0,4),
+                    **kwargs ) -> Tuple:
         """Creates a train, test and validation dataset for Australian Rain.
 
         Args:
@@ -349,25 +351,26 @@ class AustraliaRainDataset(Dataset):
         if os.path.exists(premade_dset_path):
             premade_dsets = pd.read_csv( premade_dset_path)
         else:
-            premade_dsets = pd.DataFrame( columns=['path','start_date','end_date','locations','lookback','train_val_test_split','target_distribution_name'] )
+            premade_dsets = pd.DataFrame( columns=['path','start_date','end_date','locations','lookback','train_val_test_split','target_distribution_name','target_range'] )
 
         # Query for if existing dataset is made
-        query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' | \
+        query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' and \
                 locations == '{ujson.dumps(locations)}' and \
                 lookback == {str(lookback)} and \
                 train_val_test_split == '{ujson.dumps(train_val_test_split)}' and \
-                target_distribution_name == '{target_distribution_name}'" )
+                target_distribution_name == '{target_distribution_name}' and \
+                target_range == '{target_range}'" )
 
         if len(query_res)!=0:
 
-            with open(query_res['path'][0], "rb") as f:
+            with open(query_res['path'].iloc[0], "rb") as f:
                 pkl_dset_dict = pickle.load( f ) 
             
             concat_dset_train = pkl_dset_dict['concat_dset_train']
             concat_dset_val = pkl_dset_dict['concat_dset_val']
             concat_dset_test= pkl_dset_dict['concat_dset_test']
             scaler_features = pkl_dset_dict['scaler_features']
-            scaler_targets  = pkl_dset_dict['scaler_targets']
+            scaler_target  = pkl_dset_dict['scaler_target']
 
         else: 
             # Make dataset from scratch
@@ -450,25 +453,20 @@ class AustraliaRainDataset(Dataset):
             # Scaling Targets
                 # Scaling methodology is determined by the target distribution. 
                 # Note, specific distributions such as lognormal can not be scaled to 0,1 since they are not invariant under affine transformation 
-            if target_distribution_name in ["gamma_hurdle","compound_poisson"]:
-                scaler_targets = MaxAbsScaler()
-            elif target_distribution_name in ['lognormal_hurdle']:
-                scaler_targets = MaxAbsScaler()
-            else:
-                scaler_targets = None
+            scaler_target = MinMaxScaler( feature_range = target_range )
 
-            types_aux = pd.DataFrame(targets_raw.dtypes)
+            types_aux = pd.DataFrame(targets_raw.dtypes) 
             types_aux.reset_index(level=0, inplace=True)
             types_aux.columns = ['Variable','Type']
             numerical_target = list(types_aux[types_aux['Type'] == 'float64']['Variable'].values)
             target_transform = pd.DataFrame(data = targets_raw )
             
-            if scaler_targets is not None:
+            if scaler_target is not None:
                 _ = targets_raw[numerical_target][ (targets_raw[numerical_target].index >= pd.Timestamp(start_date) ) &
                                                       (targets_raw[numerical_target].index <= end_train_date) ]
-                scaler_targets.fit( _ )
+                scaler_target.fit( _ )
 
-                target_transform[numerical_target] = scaler_targets.transform(targets_raw[numerical_target])
+                target_transform[numerical_target] = scaler_target.transform(targets_raw[numerical_target])
 
             # replace "Yes","No" with binary
             target_transform['RainToday'] = target_transform['RainToday'].replace(['Yes', 'No'], [1,0])
@@ -535,7 +533,7 @@ class AustraliaRainDataset(Dataset):
             path_ = os.path.join('Data','australia_rain','premade_dsets', f'{str(new_dset_number)}.pkl')
 
             with open(path_,"wb") as f:
-                pickle.dump({'concat_dset_train':concat_dset_train, 'concat_dset_val':concat_dset_val, 'concat_dset_test':concat_dset_test, 'scaler_features':scaler_features, 'scaler_targets':scaler_targets }, f  )
+                pickle.dump({'concat_dset_train':concat_dset_train, 'concat_dset_val':concat_dset_val, 'concat_dset_test':concat_dset_test, 'scaler_features':scaler_features, 'scaler_target':scaler_target }, f  )
             premade_dsets = premade_dsets.append( {'path':path_,
                                     'start_date':start_date,
                                     'end_date':end_date,
@@ -543,11 +541,11 @@ class AustraliaRainDataset(Dataset):
                                     'lookback':str(lookback),
                                     'train_val_test_split':ujson.dumps(train_val_test_split),
                                     'target_distribution_name': target_distribution_name,
-                                    
+                                    'target_range':str(scaler_target.feature_range)
                                      } , ignore_index=True)
             premade_dsets.to_csv(premade_dset_path, index=False)
 
-        return concat_dset_train, concat_dset_val, concat_dset_test, scaler_features, scaler_targets
+        return concat_dset_train, concat_dset_val, concat_dset_test, scaler_features, scaler_target
     
     @staticmethod
     def parse_data_args(parent_parser):
@@ -558,7 +556,7 @@ class AustraliaRainDataset(Dataset):
         parser.add_argument("--output_shape", default=(1,) )
         parser.add_argument("--lookback", default=7, type=int )
         parser.add_argument("--locations", type= lambda _str:json.loads(_str), default=AustraliaRainDataset.valid_locations )
-
+        parser.add_argument("--min_rain_value",type=float, default=1.0)
         data_args = parser.parse_known_args()[0]
         return data_args
 

@@ -1,7 +1,17 @@
+# Presentation Folders
 Data
 Presentations
 RelevantPapers/*
+Notebooks/*
 
-*__pycache__
+
+# Python / IDE files
 .vscode/settings*
+*__pycache__
+
+
+# Large Data folders
 Checkpoints/*
+
+#Shell scripts
+*.sh
