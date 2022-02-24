@@ -78,9 +78,9 @@ class LogNormalHurdle():
         Returns:
             [type]: [description]
         """
-        mu = torch.log(mu)
+        
         mu = mu + torch.log( torch.as_tensor( 1/scaler.scale_, device=mu.device) )
-        mu = torch.exp(mu) 
+        
         disp = disp
 
         return mu, disp, p
@@ -88,20 +88,16 @@ class LogNormalHurdle():
     @classmethod    
     def get_mean(cls, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            mu = torch.log(mu)
             mean =  torch.where( p>=0.5, torch.exp( mu + disp.pow(2)/2), 0.0 )
         elif isinstance(mu, np.ndarray):
-            mu = np.log(mu)
             mean = np.where( p>=0.5, np.exp( mu + np.power(disp,2)/2), 0.0 )
 
         return mean
     @classmethod
     def get_variance(cls, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            mu = torch.log(mu)
             var =  torch.where( p>=0.5, ( torch.exp(disp) - 1 ) * torch.exp(2*mu + disp), 0.0 )
         elif isinstance(mu, np.ndarray):
-            mu = np.log(mu)
             var =  np.where( p>=0.5, ( np.exp(disp) - 1 ) * np.exp(2*mu + disp), 0.0 )
 
         return var 
@@ -109,10 +105,8 @@ class LogNormalHurdle():
     @classmethod
     def get_mode(cls, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            mu = torch.log(mu)
             mode =  torch.where( p>=0.5, torch.exp(mu-disp), 0.0 )
         elif isinstance(mu, np.ndarray):
-            mu = np.log(mu)
             mode =  np.where( p>=0.5, np.exp(mu-disp), 0.0 )
         return mode
 

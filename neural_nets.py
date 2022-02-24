@@ -23,6 +23,7 @@ class HLSTM(nn.Module):
                     output_shape=(2,),
                     hidden_dim:int=64,
                     num_layers:int=2, 
+                    dropoutw:float=0.35,
                     p_variable_model:bool=False,
                     zero_inflated_model:bool=False ) -> None:
         """[summary]
@@ -47,16 +48,16 @@ class HLSTM(nn.Module):
 
         self.encoder = nn.Sequential(
                         *[SkipConnectionLSTM(LSTM( input_size=hidden_dim, hidden_size=hidden_dim, num_layers=num_layers//2,
-                            dropouti=0.25, dropoutw=0.45, dropouto=0.25, batch_first=True, proj_size=hidden_dim//2,
+                            dropouti=0.25, dropoutw=dropoutw, dropouto=0.25, batch_first=True, proj_size=hidden_dim//2,
                             bidirectional=True)) for n in range(num_layers//2)],
             ExtractLSTMOutputFeatures(elem="all")
         )
 
         self.outp_mu = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
-        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=False) )
+        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
 
         if self.p_variable_model:
-            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=False) )
+            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
 
     def forward(self, x, standardized_output=True):
         x = self.upscale(x)
@@ -77,8 +78,10 @@ class HLSTM(nn.Module):
         parser = argparse.ArgumentParser(
             parents=[parent_parser], add_help=True, allow_abbrev=False)
 
-        parser.add_argument("--num_layers", default=3, type=int)
+        parser.add_argument("--num_layers", default=4, type=int)
         parser.add_argument("--hidden_dim", default=64, type=int)
+        parser.add_argument("--dropoutw", default=0.35, type=float)
+
             
         model_args = parser.parse_known_args()[0]
         return model_args
@@ -116,7 +119,8 @@ class SkipConnectionLSTM(nn.Module):
     def forward(self, inp):
         
         if isinstance(inp, Tuple):
-            outp, hx = self.inner_lstm(*inp)
+            inp, inp_h = inp
+            outp, hx = self.inner_lstm(inp)
         else:
             outp, hx = self.inner_lstm(inp)
 

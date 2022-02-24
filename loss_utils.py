@@ -37,15 +37,21 @@ class LogNormalHurdleNLLLoss(_Loss):
     def lognormal_nll(self, obs, mu, disp ):
 
         # disp = disp.clone()
-        obs = obs.clone()
+        # obs = obs.clone()
+        # with torch.no_grad():
+        #     # disp.clamp_(min=self.eps)
+        #     # obs.clamp_(min=self.eps)
+        #     obs.clamp_(min=mu.exp().min())
+
+        logobs = torch.log(obs)
+        logobs = logobs.clone()
         with torch.no_grad():
-            # disp.clamp_(min=self.eps)
-            obs.clamp_(min=self.eps)
+            logobs.clamp_(min=mu.min())
             
-        ll  = -0.5 * (torch.log(disp) + (torch.log(obs) - torch.log(mu) )**2 / disp) 
+        ll  = -0.5 * (torch.log(disp) + (logobs - mu )**2 / disp) 
                         
         if self.full:
-            ll += -0.5*torch.log(2*self.pi) - torch.log(obs)
+            ll += -0.5*torch.log(2*self.pi) - logobs
 
         return -ll
 
@@ -97,6 +103,7 @@ class LogNormalHurdleNLLLoss(_Loss):
         # Calculate the ll-loss
         indices_rainydays = torch.where(did_rain.view( (1,-1))==1)
         
+
         rain_rainydays = rain.view((1,-1))[indices_rainydays]
         mu_rainydays = mu.view((1,-1))[indices_rainydays]
         disp_rainydays = disp.view((1,-1))[indices_rainydays]
@@ -126,7 +133,8 @@ class LogNormalHurdleNLLLoss(_Loss):
         pred_mse = torch.nn.functional.mse_loss(
             mean.view((1,-1))[indices_rainydays],
             rain.view((1,-1))[indices_rainydays]
-        ) #MSE on days it did rain
+        ) 
+        #MSE on days it did rain
         
 
         pred_metrics = {'pred_acc': pred_acc,
@@ -407,7 +415,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
                 jmax = jmax[:, None].expand( jmax.numel(), (self.j_window_size*2) - 1) #expanding
                 j = (jmax + self.j_window).transpose(0,1) # This is a range of j for each index
 
-            if self.tblogger and self.training:
+            if False and self.tblogger and self.training:
                 _1 = (j*a)*torch.log(L)
                 _2 = (j*-a)*torch.log(p-1)
                 _3 = (-j*(1+a))*torch.log(theta)
