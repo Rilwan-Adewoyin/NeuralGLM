@@ -1,4 +1,5 @@
 import torch
+from torch._C import Value
 from torch.autograd.grad_mode import set_grad_enabled
 from torch.distributions.gamma import Gamma
 from torch.distributions.half_normal import HalfNormal
@@ -22,13 +23,14 @@ from torch.distributions.transforms import ExpTransform
 from torch.distributions.transformed_distribution import TransformedDistribution
 from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures, StandardScaler, FunctionTransformer, MaxAbsScaler
 from loss_utils import *
-
+import regex as re
 import distributions
 
-from typing import List
+from typing import List, Dict
+from pytorch_lightning.utilities.types import _METRIC
+from torch.nn import functional as F
 
-
-#Mean functions
+#mu functions
 class Inverse(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -47,30 +49,81 @@ class Inverse(torch.nn.Module):
 class Shift(torch.nn.Module):
     def __init__(self, shift=1) -> None:
         super().__init__()
-        self.shift = shift
+        # self.shift = shift
+        self.register_buffer('shift', torch.tensor([shift]))
 
     def forward(self, x ):
         x = x + self.shift
         return x
 
+class Multiply(torch.nn.Module):
+    def __init__(self, multiple=2) -> None:
+        super().__init__()
+        self.register_buffer('multiple', torch.tensor([multiple]))
+
+    def forward(self, x ):
+        x = x*self.multiple
+        return x
+
+class Clamp(torch.nn.Module):
+    def __init__(self, lb=1e-6, ub=1-1e-6) -> None:
+        super().__init__()
+        self.lb = lb
+        self.ub = ub
+
+    def forward(self, x ):
+        x = x.clamp(self.lb, self.ub)
+        return x
+
+class ExponentialActivation(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer('z', torch.tensor([0.0]))
+    
+    def forward(self, x):
+        outp = torch.maximum(self.z.expand(x.shape), torch.exp(x)-1 )
+        return outp
+
+class Log(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def forward(self, x):
+        outp = torch.log(x)
+        return outp
+
 MAP_LINK_INVFUNC = {
-    'relu':torch.nn.ReLU(),
+    'identity':torch.nn.Identity,
+    'relu':torch.nn.ReLU,
+    'relu_yshift eps': torch.nn.Sequential( torch.nn.ReLU(), Shift( 1e-6 ) ),
+    'relu_xshift1_yshifteps': torch.nn.Sequential( Shift(1), torch.nn.ReLU(), Shift( 1e-6 ) ),
+    
+    'xshiftn_relu_yshifteps': lambda n: torch.nn.Sequential( Shift(n), torch.nn.ReLU(), Shift( 1e-6 ) ),
+    'xshiftn_relu_yshifteps_inverse': lambda n:torch.nn.Sequential( Shift(n), torch.nn.ReLU(), Shift( 1e-4 ), Inverse() ),
+    'xshiftn_relu_timesm_yshifteps':lambda shift, mult: torch.nn.Sequential( Shift(shift), torch.nn.ReLU(), Multiply(mult) , Shift( 1e-3 ) ),
+    'xshiftn_relu_timesm_yshiftn':lambda xshift, mult, yshift: torch.nn.Sequential( Shift(xshift), torch.nn.ReLU(), Multiply(mult) , Shift( yshift ) ),
+    
+    'xmult_exponential_yshifteps':lambda mult, mineps : torch.nn.Sequential( Multiply(mult), ExponentialActivation(), Shift(mineps) ),
+    'xmult_exponential_yshifteps_log':lambda mult, mineps : torch.nn.Sequential( Multiply(mult), ExponentialActivation(), Shift(mineps), Log() ),
+
     'relu_inverse':torch.nn.Sequential( torch.nn.ReLU(), Inverse() ),
+    'relu_yshifteps_inverse':torch.nn.Sequential( torch.nn.ReLU(), Shift( 1e-4 ) , Inverse() ),
+    
     'sigmoid':torch.nn.Sigmoid(),
-    'sigmoid_shift_1': torch.nn.Sequential( torch.nn.Sigmoid(), Shift()  )
+    'sigmoid_yshiftn': lambda shift: torch.nn.Sequential( torch.nn.Sigmoid(), Shift(shift) ),
+    'sigmoid_yshift1': torch.nn.Sequential( torch.nn.Sigmoid(), Shift(1) ),
+    'sigmoid_yshift6': torch.nn.Sequential( torch.nn.Sigmoid(), Shift(6) ),
+    'sigmoid_clamp_eps': torch.nn.Sequential( torch.nn.Sigmoid(), Clamp( lb=1e-6, ub=1-1e-6 ) ),
+    'divn_sigmoid_clampeps_yshiftm': lambda factor, shift : torch.nn.Sequential( Multiply(1/factor), torch.nn.Sigmoid(), Clamp( lb=1e-1, ub=1-1e-1 ), Shift(shift) )     
 }
-
+    
 # Maps the distribution name to a list of canonical/common inverse link functions. 
-MAP_DISTRIBUTION_MEANLINKFUNC = {
-    'lognormal_hurdle' : ['relu','relu_inverse' ],
-    'gamma_hurdle':['relu','relu_inverse' ],
-    'compound_poisson':['relu','relu_inverse']
-}
 
-MAP_DISTRIBUTION_DISPERSIONLINKFUNC = {
-    'lognormal_hurdle':['relu','relu_inverse'],
-    'gamma_hurdle':['relu','relu_inverse' ],
-    'compound_poisson': ['relu','relu_inverse'],
+MAP_DISTRIBUTION_LINKFUNC = {
+    'beta':['sgimoid','sigmoid_clamp_eps'],
+    'gamma':['relu','relu_inverse','relu_yshifteps','relu_yshifteps_inverse','sigmoid_clamp_eps'],
+    'normal':['relu','relu_inverse','relu_yshifteps'],
+    'uniform_positive':['relu_xshift1_yshifteps', 'relu_yshifteps_inverse','relu_yshifteps','relu_xshift0-1_yshifteps','relu_xshift2_times4_yshifteps','relu_xshift0-1_yshifteps_inverse']
 }
 
 MAP_NAME_DISTRIBUTION = {
@@ -97,18 +150,19 @@ MAP_DISTRIBUTION_LOSS = {
 
 class GLMMixin:
 
-    def _get_inv_link(self, link_name):
-        invfunc =   MAP_LINK_INVFUNC[link_name]            
+    def _get_inv_link(self, link_name, params=None):
+        
+        invfunc =   MAP_LINK_INVFUNC[link_name]
+        
+        if not hasattr(invfunc, '__dict__') or params:
+            invfunc = invfunc(*params)            
+        elif not hasattr(invfunc, '__dict__') and params==None:
+            raise ValueError(f"params can not be None when using {link_name} activation function")
         return invfunc
 
-    def check_distribution_mean_link(self, distribution_name, link_name):
+    def check_distribution_link(self, distribution_name, link_name):
         #TODO: implement code that checks if the distribution and link function chosen by a user match
-        bool_check = link_name in MAP_DISTRIBUTION_MEANLINKFUNC.get(distribution_name,[])
-        return bool_check
-
-    def check_distribution_dispersion_link(self, distribution_name, link_name):
-        #TODO: implement code that checks if the distribution and link function chosen by a user match
-        bool_check = link_name in MAP_DISTRIBUTION_DISPERSIONLINKFUNC.get(distribution_name,[])
+        bool_check = link_name in MAP_DISTRIBUTION_LINKFUNC.get(distribution_name,[])
         return bool_check
 
     def _get_distribution(self, distribution_name:str) -> Distribution:
@@ -121,108 +175,63 @@ class GLMMixin:
             [type]: [description]
         """
         return MAP_NAME_DISTRIBUTION[distribution_name]
-    
-    def _get_mean_range(self, distribution_name, scaler=None):
-        
-        # Range based on modelling
-        if distribution_name == "gamma_hurdle" and scaler:
-            min = scaler.transform([[0.5]])[0][0]
-            max = None
-
-        elif distribution_name == "compound_poisson" and scaler:
-            min = scaler.transform([[0.5]])[0][0]
-            max = None
-        
-        elif distribution_name == "lognormal_hurdle" and scaler:
-            min = scaler.transform([[0]])[0][0]
-            max = None
-
-        # Range based on Scaler used to make dataset
-        elif scaler==None:
-            min = 0
-            max = None
-           
-        else:
-            raise NotImplementedError
-        
-        return min, max
-        
+            
     def _get_dispersion_range(self, distribution_name, **kwargs):
 
-    
-        if distribution_name == "lognormal":
-            min = kwargs.get('eps',1e-3)
-            max = None
-
-        elif distribution_name == "lognormal_hurdle":
+        if distribution_name == "lognormal_hurdle":
             min = kwargs.get('eps',1e-3 )
             max = None
         
         elif distribution_name == "gamma_hurdle":
-            min = kwargs.get('eps',1e-2 )
+            #Dispersion should range between 0 and 1, any larger and the gamma distribution places a large weight on 0
+            min = None
             max = None
         
         elif distribution_name == "compound_poisson":
-            min = kwargs.get('eps',1e-2 )
+            min = kwargs.get('eps',1e-1 )
             max = None
         
         return min, max
     
-    def destandardize(self, mean: Union[Tensor, np.ndarray], disp, 
-                            p,
-                            target_distribution_name, 
-                            scaler: Union[MinMaxScaler,StandardScaler,MaxAbsScaler] ):
-        """When standardizing/destandardizing a glm's output we must be concious of the distribution we are sampling from
+    def unscale_rain(self, rain_scaled, scaler ):
 
-            Here we provide logic that provides distribution specific scaling for the mean and dispersion terms we predict
+        if type(scaler) == MaxAbsScaler:
+            rain = rain_scaled*scaler.scale_[0]
 
-            NOTE: the destandardization we use is for the Exponential Dispersion versions of Gamma
-
-        Args:
-            mean (Union[Tensor, np.ndarray]): [description]
-            disp ([type]): [description]
-            target_distribution_name ([type]): [description]
-            scaler (Union[MinMaxScaler,StandardScaler,]): [description]
-
-        Returns:
-            [type]: [description]
-        """
-
-        if target_distribution_name == "gamma_hurdle":
-            mean = scaler.inverse_transform(mean)
-            disp = disp
-
-        elif target_distribution_name == "lognormal_hurdle":
-            mean = mean - scaler.scale_[0]
-            disp = disp
-                
-        elif target_distribution_name == "compound_poisson":
-            mean = scaler.inverse_transform(mean)
-            disp = disp * scaler.scale_[0]**(2-p)
-        
+        elif type(scaler) == MinMaxScaler:
+            rain = rain_scaled * torch.as_tensor(1/scaler.scale_, device=rain_scaled.device)
         else:
-            raise NotImplementedError("We do not have rules for destandardizing this type of distribution")
-
-        return mean, disp, p
+            raise NotImplementedError
+        return rain
 
     def _get_loglikelihood_loss_func(self,  distribution_name ):
-
         return MAP_DISTRIBUTION_LOSS[distribution_name]
-    
-    def _get_p_inverse_link_function(self, target_distribution_name):
-        
-        if "hurdle" in target_distribution_name:
-            #p is interpreted as probability of rain
-            p_link_name = 'sigmoid'
-            p_invere_link_function = self._get_inv_link(p_link_name)
-        
-        elif target_distribution_name == "compound_poisson":
-            p_link_name = 'sigmoid_shift_1'
 
-            p_invere_link_function = self._get_inv_link(p_link_name)
-       
-        else:
-            p_invere_link_function = None
+def _format_checkpoint_name(
+    cls,
+    filename: Optional[str],
+    metrics: Dict[str, _METRIC],
+    prefix: str = "",
+    auto_insert_metric_name: bool = True,
+    ) -> str:
+    if not filename:
+        # filename is not set, use default name
+        filename = "{epoch}" + cls.CHECKPOINT_JOIN_CHAR + "{step}"
 
-        return p_invere_link_function
+    # check and parse user passed keys in the string
+    groups = re.findall(r"(\{.*?)[:\}]", filename)
+    if len(groups) >= 0:
+        for group in groups:
+            name = group[1:]
 
+            if auto_insert_metric_name:
+                filename = filename.replace(group, name.replace("/","_") + "={" + name)
+
+            if name not in metrics:
+                metrics[name] = 0
+        filename = filename.format(**metrics)
+
+    if prefix:
+        filename = cls.CHECKPOINT_JOIN_CHAR.join([prefix, filename])
+
+    return filename

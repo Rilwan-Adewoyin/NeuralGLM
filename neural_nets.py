@@ -9,43 +9,10 @@ import einops
 import pytorch_lightning as pl
 from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures, StandardScaler
 import torchtyping
+from typing import Tuple
 import argparse
 from torch.nn import Parameter
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
-
-
-class MLP(nn.Module):
-
-    model_type = "MLP"
-
-    def __init__(self, input_shape=(6,), output_shape=(1,), dropout=0.0 ,**kwargs ):
-        super().__init__()
-
-        raise NotImplementedError
-        self.input_shape = input_shape
-        self.output_shape = output_shape
-        self.dropout = dropout
-        
-        self.encoder = nn.Sequential(nn.Linear( *self.input_shape, 32), 
-                                nn.SELU() ,
-                                nn.Linear(32, 16),
-                                nn.SELU() ) 
-
-        self.outp_mean = nn.Linear(16,*output_shape)
-        self.outp_dispersion =  nn.Linear(16, *self.output_shape)
-
-    def forward(self, x):
-        h = self.encoder(x)
-        pred_mean = self.outp_mean(h)
-        pred_dispersion = self.outp_dispersion(h)
-        return pred_mean, pred_dispersion
-
-    @staticmethod
-    def parse_model_args(parent_parser):
-        parser = argparse.ArgumentParser(
-            parents=[parent_parser], add_help=True, allow_abbrev=False)
-        model_args = parser.parse_known_args()[0]
-        return model_args
 
 class HLSTM(nn.Module):
     
@@ -54,8 +21,9 @@ class HLSTM(nn.Module):
     def __init__(self,
                     input_shape=(6,),
                     output_shape=(2,),
-                    hidden_dim:int=32,
+                    hidden_dim:int=64,
                     num_layers:int=2, 
+                    dropoutw:float=0.35,
                     p_variable_model:bool=False,
                     zero_inflated_model:bool=False ) -> None:
         """[summary]
@@ -75,29 +43,29 @@ class HLSTM(nn.Module):
         self.p_variable_model = p_variable_model
         self.zero_inflated_model = zero_inflated_model
 
-        self.upscale = nn.Sequential( nn.Linear( input_shape[0], hidden_dim, bias=False ), nn.SELU() )
+        self.upscale = nn.Sequential( nn.Linear( input_shape[0], hidden_dim, bias=False ) )
 
 
         self.encoder = nn.Sequential(
-            LSTM( input_size = hidden_dim, hidden_size=hidden_dim, num_layers=num_layers,
-                    dropouti=0.20, dropoutw=0.35, dropouto=0.25,
-                    batch_first=True, bidirectional=True),
-            ExtractLSTMOutputFeatures()
+                        *[SkipConnectionLSTM(LSTM( input_size=hidden_dim, hidden_size=hidden_dim, num_layers=num_layers//2,
+                            dropouti=0.25, dropoutw=dropoutw, dropouto=0.25, batch_first=True, proj_size=hidden_dim//2,
+                            bidirectional=True)) for n in range(num_layers//2)],
+            ExtractLSTMOutputFeatures(elem="all")
         )
 
-        if self.p_variable_model:
-            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim*2, hidden_dim, bias=False), nn.SELU(), nn.Linear(hidden_dim, *self.output_shape, bias=False), nn.SELU() )
+        self.outp_mu = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
+        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
 
-        self.outp_mean = nn.Sequential( nn.Linear(hidden_dim*2, *self.output_shape, bias=False) )
-        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim*2, *self.output_shape, bias=False) )
-        
+        if self.p_variable_model:
+            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
+
     def forward(self, x, standardized_output=True):
         x = self.upscale(x)
         h = self.encoder(x)
 
         output = {}
 
-        output['mean'] = self.outp_mean(h)
+        output['mu'] = self.outp_mu(h)
         output['disp'] = self.outp_dispersion(h)
 
         if self.p_variable_model:
@@ -109,6 +77,12 @@ class HLSTM(nn.Module):
     def parse_model_args(parent_parser):
         parser = argparse.ArgumentParser(
             parents=[parent_parser], add_help=True, allow_abbrev=False)
+
+        parser.add_argument("--num_layers", default=4, type=int)
+        parser.add_argument("--hidden_dim", default=64, type=int)
+        parser.add_argument("--dropoutw", default=0.35, type=float)
+
+            
         model_args = parser.parse_known_args()[0]
         return model_args
 
@@ -116,7 +90,7 @@ class ExtractLSTMOutputFeatures(nn.Module):
     """
         Module that extracts the hidden state output from an LSTM based layer in torch
     """
-    def __init__(self, bidirectional=True, elem='all') -> None:
+    def __init__(self, bidirectional=True, elem='final') -> None:
         super().__init__() 
 
         self.bidirectional = bidirectional
@@ -125,18 +99,39 @@ class ExtractLSTMOutputFeatures(nn.Module):
     def forward(self,x):
         out , _ = x
 
-        # If Bi-Directional LSTM concatenating the Directions dimension
-        if self.bidirectional == 2:
-            out = einops.rearrange( out, 'b t d h -> b t (d h)')
+        # # If Bi-Directional LSTM concatenating the Directions dimension
+        # if self.bidirectional:
+        #     out = einops.rearrange( out, 'b t d h -> b t (d h)')
 
         if self.elem == 'all':
             pass
-        elif self.elem == 'last':
+        elif self.elem == 'final':
             out = out[:, -1:, :]
 
         return out
-    
+
+class SkipConnectionLSTM(nn.Module):
+    def __init__(self, module:nn.Module) -> None:
+        super().__init__()
+
+        self.inner_lstm = module
+
+    def forward(self, inp):
+        
+        if isinstance(inp, Tuple):
+            inp, inp_h = inp
+            outp, hx = self.inner_lstm(inp)
+        else:
+            outp, hx = self.inner_lstm(inp)
+
+        if outp.shape[-1] > inp.shape[-1] and self.inner_lstm.bidirectional:
+            outp = outp + inp.repeat(1, 1 ,2)
+        else: 
+            outp = outp + inp     
+
+        return outp, hx
+
+
 MAP_NAME_NEURALMODEL = {
-    'MLP': MLP,
     'HLSTM': HLSTM
 }
