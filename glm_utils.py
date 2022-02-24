@@ -28,7 +28,7 @@ import distributions
 
 from typing import List, Dict
 from pytorch_lightning.utilities.types import _METRIC
-
+from torch.nn import functional as F
 
 #mu functions
 class Inverse(torch.nn.Module):
@@ -59,7 +59,6 @@ class Shift(torch.nn.Module):
 class Multiply(torch.nn.Module):
     def __init__(self, multiple=2) -> None:
         super().__init__()
-        # self.shift = shift
         self.register_buffer('multiple', torch.tensor([multiple]))
 
     def forward(self, x ):
@@ -76,16 +75,37 @@ class Clamp(torch.nn.Module):
         x = x.clamp(self.lb, self.ub)
         return x
 
+class ExponentialActivation(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer('z', torch.tensor([0.0]))
+    
+    def forward(self, x):
+        outp = torch.maximum(self.z.expand(x.shape), torch.exp(x)-1 )
+        return outp
+
+class Log(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def forward(self, x):
+        outp = torch.log(x)
+        return outp
+
 MAP_LINK_INVFUNC = {
     'identity':torch.nn.Identity,
     'relu':torch.nn.ReLU,
-    'relu_yshifteps': torch.nn.Sequential( torch.nn.ReLU(), Shift( 1e-6 ) ),
+    'relu_yshift eps': torch.nn.Sequential( torch.nn.ReLU(), Shift( 1e-6 ) ),
     'relu_xshift1_yshifteps': torch.nn.Sequential( Shift(1), torch.nn.ReLU(), Shift( 1e-6 ) ),
     
     'xshiftn_relu_yshifteps': lambda n: torch.nn.Sequential( Shift(n), torch.nn.ReLU(), Shift( 1e-6 ) ),
     'xshiftn_relu_yshifteps_inverse': lambda n:torch.nn.Sequential( Shift(n), torch.nn.ReLU(), Shift( 1e-4 ), Inverse() ),
     'xshiftn_relu_timesm_yshifteps':lambda shift, mult: torch.nn.Sequential( Shift(shift), torch.nn.ReLU(), Multiply(mult) , Shift( 1e-3 ) ),
+    'xshiftn_relu_timesm_yshiftn':lambda xshift, mult, yshift: torch.nn.Sequential( Shift(xshift), torch.nn.ReLU(), Multiply(mult) , Shift( yshift ) ),
     
+    'xmult_exponential_yshifteps':lambda mult, mineps : torch.nn.Sequential( Multiply(mult), ExponentialActivation(), Shift(mineps) ),
+    'xmult_exponential_yshifteps_log':lambda mult, mineps : torch.nn.Sequential( Multiply(mult), ExponentialActivation(), Shift(mineps), Log() ),
+
     'relu_inverse':torch.nn.Sequential( torch.nn.ReLU(), Inverse() ),
     'relu_yshifteps_inverse':torch.nn.Sequential( torch.nn.ReLU(), Shift( 1e-4 ) , Inverse() ),
     
@@ -193,7 +213,7 @@ def _format_checkpoint_name(
     metrics: Dict[str, _METRIC],
     prefix: str = "",
     auto_insert_metric_name: bool = True,
-) -> str:
+    ) -> str:
     if not filename:
         # filename is not set, use default name
         filename = "{epoch}" + cls.CHECKPOINT_JOIN_CHAR + "{step}"

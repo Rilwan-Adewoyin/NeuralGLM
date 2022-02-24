@@ -309,8 +309,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
     def configure_optimizers(self):
         optimizer = Adafactor(self.parameters(), scale_parameter=True, relative_step=True, 
                                 warmup_init=True, lr=None, 
-                                weight_decay=1e-2,
-                                clip_threshold=0.75
+                                weight_decay=0.1,
+                                clip_threshold=0.5
                                  )
         lr_scheduler = AdafactorSchedule(optimizer)
         return { 'optimizer':optimizer, 
