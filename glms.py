@@ -1,3 +1,4 @@
+from dataloaders import Era5EobsDataset
 from typing import Union
 import torch
 from torch._C import Value
@@ -21,6 +22,7 @@ import yaml
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 from typing import Dict, Any
 import json
+import pandas as pd
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
 def tuple_type(strings):
@@ -63,22 +65,26 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             debugging = False,
 
             min_rain_value= 1.0,
+            task = None,
             **kwargs):
 
         super().__init__()
+
+        # Task
+        self.task = task
+        self.dconfig = kwargs.get('dconfig',None)
 
         # Load Neural Model
         neural_net_class = MAP_NAME_NEURALMODEL[nn_name]
         neural_net = neural_net_class( **nn_params )
         self.neural_net = neural_net
 
-        # Restraints on predictions for MaxMin standardized target
-        self.scaler_target = scaler_target
-        self.scaler_features = scaler_features
         
         # Saving specific hyper-parameters to hparams file
         # this should only run if you are about to train model, atm it runs whenever you load model
-        ignore_list = ['save_hparams', "scaler_features","scaler_target","debugging"]
+        ignore_list = ['save_hparams', "scaler_features","scaler_target","debugging","feature_start_date",
+                "train_start_date","test_set_size_elements","train_set_size_elements",
+                "val_set_size_elements","original_uk_dim"]
         if save_hparams:
             self.save_hyperparameters(ignore=ignore_list)
 
@@ -118,13 +124,16 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         self.debugging = debugging
         
     def forward(self, x ):
+        
         output = self.neural_net(x)
-
+        
+        #Applying mean function
         mu = self.mu_inverse_link_function(output['mu'])
         disp = self.dispersion_inverse_link_function(output['disp'])
         if self.neural_net.p_variable_model:
-            output['p'] = self.p_inverse_link_function(output['logits']) 
-          
+            p = self.p_inverse_link_function(output['logits']) 
+
+        #clamp dispersion term
         disp = disp.clone()
         with torch.no_grad():
             if self.min_dispersion_output_standardized or self.max_disperion_output_standardized:
@@ -132,28 +141,80 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
         mu = mu.squeeze(-1)
         disp = disp.squeeze(-1)
+        p = p.squeeze(-1)
+        output['logits'] = output['logits'].squeeze(-1)
     
         output['mu'] = mu
         output['disp'] = disp
+        output['p'] = p
         
         return output
 
     def step(self, batch, step_name ):
         
-        inp, target = batch
-        target_did_rain, target_rain_value = torch.unbind(target,-1)
+        # Generating predictions
+        if self.task in ["toy","australia_rain"]:
+            inp, target = batch
+            target_did_rain, target_rain_value = torch.unbind(target,-1)
 
-        output  = self.forward(inp)
-        pred_mu = output['mu']
-        pred_disp = output['disp'] 
+            output  = self.forward(inp)
+            pred_mu = output['mu']
+            pred_disp = output['disp'] 
+        
+        elif self.task in ["uk_rain"]:
+                       
+            #For the case of UK Eobs dset
+            inp = batch['input']
+            target = batch['target']
+            mask = batch.get('mask',None)
+            idx_loc_in_region = batch.get('idx_loc_in_region',None)
+            
+            # Predicting
+            output  = self.forward(inp)
+            pred_mu = output['mu']
+            pred_disp = output['disp'] 
+            pred_p  = output['p']
 
-         
+            # extracting the central region of interest
+            bounds = Era5EobsDataset.central_region_bounds(self.dconfig) #list [ lower_h_bound[0], upper_h_bound[0], lower_w_bound[1], upper_w_bound[1] ]
+
+            if pred_mu.dim() == 2 :
+                pred_mu = pred_mu[..., None, None]
+                pred_disp = pred_disp[..., None, None]
+                pred_p = pred_p[..., None, None]
+                pred_logits = output['logits'][..., None, None]
+                mask = mask[..., None, None]
+            if target.dim() == 2:    
+                target = target[..., None, None]
+                
+            pred_mu   = Era5EobsDataset.extract_central_region(pred_mu, bounds )
+            pred_disp   = Era5EobsDataset.extract_central_region(pred_disp, bounds )
+            pred_p   = Era5EobsDataset.extract_central_region(pred_p, bounds )
+            pred_logits   = Era5EobsDataset.extract_central_region(pred_logits, bounds )
+            mask    = Era5EobsDataset.extract_central_region(mask, bounds )
+            target1  = Era5EobsDataset.extract_central_region(target, bounds )
+
+            # applying mask to predicted values
+            pred_mu    = torch.masked_select(pred_mu, ~mask )
+            pred_disp    = torch.masked_select(pred_disp, ~mask ) 
+            pred_p = torch.masked_select(pred_p, ~mask ) 
+            target2   = torch.masked_select(target1, ~mask )
+            
+            pred_logits = torch.masked_select(pred_logits, ~mask )
+            
+            # Creating target labels
+            target_rain_value = target2
+            target_did_rain = torch.where( target_rain_value > 0.5*self.target_scale, 1.0, 0.0 )
+        
+        # Calculating Losses
         if self.neural_net.p_variable_model:
-            pred_p = output['p'].squeeze(-1)  
-            logits = output['logits'].squeeze(-1)     
-            loss, composite_losses = self.loss_fct( target_rain_value, target_did_rain, pred_mu, pred_disp, logits=logits, p=pred_p, global_step=self.global_step )
+            # pred_p = pred_p.squeeze(-1)  
+            # pred_logits = pred_logits.squeeze(-1)   
 
-            pred_mu_unscaled, pred_disp_unscaled, _ = self.target_distribution.unscale_distribution( pred_mu.detach(), pred_disp.detach(),
+            loss, composite_losses = self.loss_fct( target_rain_value, target_did_rain, pred_mu, pred_disp, logits=pred_logits, p=pred_p, global_step=self.global_step )
+
+            pred_mu_unscaled, pred_disp_unscaled, _ = self.target_distribution.unscale_distribution( 
+                                                        pred_mu.detach(), pred_disp.detach(),
                                                         pred_p.detach(), self.scaler_target )
 
             pred_mean = self.target_distribution.get_mean( pred_mu_unscaled, pred_disp_unscaled, pred_p )
@@ -161,27 +222,40 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             rain_unscaled = self.unscale_rain(target_rain_value, self.scaler_target)
 
             pred_metrics = self.loss_fct.prediction_metrics(rain_unscaled, target_did_rain, pred_mean,
-                                                             logits=logits, p=pred_p, min_rain_value=self.min_rain_value )
+                                                             logits=pred_logits, p=pred_p, min_rain_value=self.min_rain_value )
+            
+            loss.masked_fill_(loss.isnan(), 0)
 
         else:
             loss = self.loss_fct( target_rain_value, pred_mu, pred_disp )
             composite_losses = None
             pred_metrics = None
 
-        if self.debugging and step_name=='train':
+            loss.masked_fill_(loss.isnan(), 0)
+        
+        
+
+        # Logging
+        if self.debugging and step_name=='train' and pred_mu.numel() != 0:
             tblogger = self.trainer.logger.experiment
             global_step = self.trainer.global_step
+        
             tblogger.add_histogram('mu', pred_mu, global_step=global_step)
             tblogger.add_histogram('disp', pred_disp, global_step=global_step)
-            if self.neural_net.p_variable_model: 
+        
+            if self.neural_net.p_variable_model:
                 tblogger.add_histogram('p', output['p'], global_step=global_step )
 
         if step_name in ['train','val']:
             return {'loss':loss, 'composite_losses':composite_losses, 'pred_metrics':pred_metrics }
 
         elif step_name in ['test']:
-            output =  {'loss':loss, 'pred_mu':pred_mu, 'pred_disp':pred_disp,  
-                            'target_did_rain':target_did_rain, 'target_rain_value':target_rain_value, 'pred_metrics':pred_metrics }
+            output =  {'loss':loss, 'pred_mu':pred_mu.detach().to('cpu'), 'pred_disp':pred_disp.detach().to('cpu'),  
+                            'target_did_rain':target_did_rain.detach().to('cpu'), 'target_rain_value':target_rain_value.detach().to('cpu'), 
+                            'pred_metrics':pred_metrics }
+                            
+            if self.task == "uk_rain": output['idx_loc_in_region'] = idx_loc_in_region.detach().to('cpu')
+
 
             if self.neural_net.p_variable_model:
                 output['composite_losses'] = composite_losses
@@ -206,7 +280,9 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
     
     def validation_step(self, batch, batch_idx):
         output  = self.step(batch, "val")
-        self.log("val_loss/loss", output['loss'], prog_bar=True, on_epoch=True, on_step=False)
+        output["val_loss/loss"] = output["loss"]
+        # self.log("val_loss/loss", output['loss'], prog_bar=True, on_epoch=True, on_step=False)
+        self.log("val_loss/loss", output['loss'], prog_bar=True)
 
         if output.get('composite_losses', None):
             self.log("val_loss/norain", output['composite_losses']['loss_norain'], on_step=False, on_epoch=True)
@@ -236,7 +312,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             self.log("test_loss/norain", output['composite_losses']['loss_norain'], on_epoch=True, prog_bar=True)
             self.log("test_loss/rain", output['composite_losses']['loss_rain'], on_epoch=True, prog_bar=True)
 
-        if output.get( 'pred_metrics', None):
+        if output.get('pred_metrics', None):
             self.log("test_metric/acc",output['pred_metrics']['pred_acc'] , on_step=False, on_epoch=True)
             self.log("test_metric/recall",output['pred_metrics']['pred_rec'] , on_step=False, on_epoch=True)
             self.log("test_metric/mse_rain",output['pred_metrics']['pred_mse'] , on_step=False, on_epoch=True, )
@@ -271,59 +347,99 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         # Split predictions by location
         test_dl = self.trainer.test_dataloaders[0]
 
-        locations = [ ds.location for ds in test_dl.dataset.datasets]
-        cumulative_sizes = [0] + test_dl.dataset.cumulative_sizes
-        
-        dict_location_data = {}
-        for idx, loc in enumerate(locations):
-            if cumulative_sizes==0:
-                continue
-            s_idx = cumulative_sizes[idx]
-            e_idx = cumulative_sizes[idx+1]
-
-            lookback = test_dl.dataset.datasets[idx].lookback
-            dates = test_dl.dataset.datasets[idx].dates #dates in dataset that are valid
-            indexes_filtrd = test_dl.dataset.datasets[idx].indexes_filtrd #indexes_filtrd
+        if self.task == "australia_rain":
+            locations = [ ds.location for ds in test_dl.dataset.datasets]
+            cumulative_sizes = [0] + test_dl.dataset.cumulative_sizes
             
-            date_windows = [ dates[idx-lookback:idx] for idx in indexes_filtrd[lookback: ] ]
+            dict_location_data = {}
+            for idx, loc in enumerate(locations):
+                if cumulative_sizes==0:
+                    continue
+                s_idx = cumulative_sizes[idx]
+                e_idx = cumulative_sizes[idx+1]
 
-            data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
-                    'pred_disp':pred_disp_unscaled[s_idx:e_idx],
-                    'target_did_rain':target_did_rain[s_idx:e_idx],
-                    'target_rain_value':target_rain_unscaled[s_idx:e_idx],
-                    'date':date_windows }
+                lookback = test_dl.dataset.datasets[idx].lookback
+                dates = test_dl.dataset.datasets[idx].dates #dates in dataset that are valid
+                indexes_filtrd = test_dl.dataset.datasets[idx].indexes_filtrd #indexes_filtrd
+                
+                date_windows = [ dates[idx-lookback:idx] for idx in indexes_filtrd[lookback: ] ]
+
+                data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
+                        'pred_disp':pred_disp_unscaled[s_idx:e_idx],
+                        'target_did_rain':target_did_rain[s_idx:e_idx],
+                        'target_rain_value':target_rain_unscaled[s_idx:e_idx],
+                        'date':date_windows }
+                
             
-        
-            if self.neural_net.p_variable_model:
-                data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
+                if self.neural_net.p_variable_model:
+                    data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
 
-            dict_location_data[loc] = data
+                dict_location_data[loc] = data
 
-        dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
-        file_path = os.path.join( dir_path, "test_output.pkl" ) 
-        with open( file_path, "wb") as f:
-            pickle.dump( dict_location_data, f )
+            dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
+            file_path = os.path.join( dir_path, "test_output.pkl" ) 
+            with open( file_path, "wb") as f:
+                pickle.dump( dict_location_data, f )
         
+        elif self.task == "uk_rain":
+            idx_loc_in_region = torch.cat( [output['idx_loc_in_region'] for output in outputs], dim=0 )
+            dconfig = test_dl.dataset.dconfig
+            locations = dconfig.locations
+            loc_count = dconfig.loc_count
+            count_per_location = dconfig.test_set_size_elements / loc_count
+            cumulative_sizes = [ int(idx*count_per_location) for idx in range( len(locations)+1) ]
+
+            dict_location_data = {}
+            for idx, loc in enumerate(locations):
+                s_idx = cumulative_sizes[idx]
+                e_idx = cumulative_sizes[idx+1]
+
+                lookback = dconfig.lookback_target
+                dates = pd.date_range( end=dconfig.test_end, start=dconfig.test_start, freq='D', normalize=True)
+                
+                date_windows = [ dates[idx:idx+lookback] for idx in range( 0, len(pred_mu_unscaled)-lookback, lookback )  ]
+
+                data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
+                        'pred_disp':pred_disp_unscaled[s_idx:e_idx],
+                        'target_did_rain':target_did_rain[s_idx:e_idx],
+                        'target_rain_value':target_rain_unscaled[s_idx:e_idx],
+                        'idx_loc_in_region':idx_loc_in_region[s_idx:e_idx],
+                        'date':date_windows }
+                
+                if self.neural_net.p_variable_model:
+                    data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
+
+                dict_location_data[loc] = data
+
+            dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
+            file_path = os.path.join( dir_path, "test_output.pkl" ) 
+            with open( file_path, "wb") as f:
+                pickle.dump( dict_location_data, f )
+ 
         return super().test_epoch_end(outputs)
         
     def configure_optimizers(self):
         optimizer = Adafactor(self.parameters(), scale_parameter=True, relative_step=True, 
                                 warmup_init=True, lr=None, 
                                 weight_decay=0.1,
-                                clip_threshold=0.5
-                                 )
+                                clip_threshold=0.5)
+
         lr_scheduler = AdafactorSchedule(optimizer)
         return { 'optimizer':optimizer, 
-                    'lr_scheduler':lr_scheduler }
+                    'lr_scheduler':lr_scheduler,
+                    'interval':'step',
+                    'frequency':1,
 
-    def save_scalers(self, dir_path:str ) -> None:
+                     }
+
+    def save_scalers(self, dir_path:str, **kwargs ) -> None:
         os.makedirs(dir_path, exist_ok=True)
         if hasattr(self, 'scaler_features'):
-            pickle.dump(self.scaler_features,open(os.path.join(dir_path,"scaler_features.pkl"),"wb") )
+            pickle.dump(self.scaler_features, open(os.path.join(dir_path, "scaler_features.pkl"),"wb") )
 
         if hasattr(self, 'scaler_target'):
-            pickle.dump(self.scaler_features,open(os.path.join(dir_path,"scaler_target.pkl"),"wb") )
-    
+            pickle.dump(self.scaler_target, open(os.path.join(dir_path, "scaler_target.pkl"),"wb") )
+
     @classmethod
     def load_scalers(cls, dir_path:str=None):
         """Loads the scaler object from a given path.

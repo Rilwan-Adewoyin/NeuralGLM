@@ -15,7 +15,6 @@ from torch import Tensor
 from typing import Callable, Optional
 import math
 import numpy as np
-#TODO: Add to notes: Dropout Inference in Bayesian Neural Networks, page 3, column 2, last paragraph of section 2.3
 
 class LogNormalHurdleNLLLoss(_Loss):
     """A log normal distribution LN(\mu, disp) with \mu,disp \in [0, \inf] 
@@ -48,7 +47,7 @@ class LogNormalHurdleNLLLoss(_Loss):
         with torch.no_grad():
             logobs.clamp_(min=mu.min())
             
-        ll  = -0.5 * (torch.log(disp) + (logobs - mu )**2 / disp) 
+        ll  = -0.5 * (torch.log(disp) + (logobs - mu )**2 / disp ) 
                         
         if self.full:
             ll += -0.5*torch.log(2*self.pi) - logobs
@@ -101,7 +100,7 @@ class LogNormalHurdleNLLLoss(_Loss):
         loss_norain = self.bce_logits( logits, did_rain)
 
         # Calculate the ll-loss
-        indices_rainydays = torch.where(did_rain.view( (1,-1))==1)
+        indices_rainydays = torch.where( did_rain.view( (1,-1))==1 )
         
 
         rain_rainydays = rain.view((1,-1))[indices_rainydays]
@@ -136,7 +135,6 @@ class LogNormalHurdleNLLLoss(_Loss):
         ) 
         #MSE on days it did rain
         
-
         pred_metrics = {'pred_acc': pred_acc,
                         'pred_rec':pred_rec,
                             'pred_mse': pred_mse }
@@ -248,7 +246,7 @@ class GammaHurdleNLLLoss(_Loss):
 
         pred_rain_bool = torch.where( logits>=0.0, 1.0, 0.0)
         pred_acc = torch.mean(  torch.where( pred_rain_bool==did_rain, 1.0, 0.0) )
-        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum() if did_rain.sum()>0 else 1.0
+        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum() if did_rain.sum()>0 else torch.as_tensor(1.0, device=pred_rain_bool.device)
 
         indices_rainydays = torch.where(did_rain.view( (1,-1))==1.0)
 
@@ -344,7 +342,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         C = L*mu.pow(1-p)*(1-p).pow(-1) - mu.pow(2-p)*(2-p).pow(-1)
         C *=  theta.pow(-1)
 
-        #------------- Version 2 - using 0<j<=48 
+        #------------- Version 2 - using 0<j<=12
         if self.cp_version == 2:
             j = self.j
                        

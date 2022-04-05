@@ -2,6 +2,7 @@ from typing import Union
 from pytorch_lightning.utilities.types import EPOCH_OUTPUT
 from torch.optim import lr_scheduler
 from torch import nn
+import torch
 from glm_utils import GLMMixin
 from transformers.optimization import Adafactor, AdafactorSchedule
 from better_lstm import LSTM
@@ -43,7 +44,10 @@ class HLSTM(nn.Module):
         self.p_variable_model = p_variable_model
         self.zero_inflated_model = zero_inflated_model
 
-        self.upscale = nn.Sequential( nn.Linear( input_shape[0], hidden_dim, bias=False ) )
+        self.upscale = nn.Sequential( 
+                            nn.Linear( 
+                                *(self.input_shape if len(self.input_shape)==1 else self.input_shape[-1:]), 
+                                hidden_dim, bias=False ) )
 
 
         self.encoder = nn.Sequential(
@@ -53,11 +57,23 @@ class HLSTM(nn.Module):
             ExtractLSTMOutputFeatures(elem="all")
         )
 
-        self.outp_mu = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
-        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
+        self.outp_mu = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), 
+                                        nn.GELU(),
+                                        nn.Linear(hidden_dim, 
+                                                    *(self.output_shape if len(self.output_shape)==1 else self.output_shape[-1:]),
+                                                     bias=True) )
+        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), 
+                                            nn.GELU(),
+                                            nn.Linear(hidden_dim,
+                                                     *(self.output_shape if len(self.output_shape)==1 else self.output_shape[-1:]),
+                                                      bias=True) )
 
         if self.p_variable_model:
-            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim, hidden_dim, bias=False), nn.GELU(), nn.Linear(hidden_dim, *self.output_shape, bias=True) )
+            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim, hidden_dim, bias=False),
+                                                    nn.GELU(),
+                                                     nn.Linear(hidden_dim,
+                                                     *(self.output_shape if len(self.output_shape)==1 else self.output_shape[-1:]),
+                                                     bias=True) )
 
     def forward(self, x, standardized_output=True):
         x = self.upscale(x)
@@ -82,6 +98,111 @@ class HLSTM(nn.Module):
         parser.add_argument("--hidden_dim", default=64, type=int)
         parser.add_argument("--dropoutw", default=0.35, type=float)
 
+            
+        model_args = parser.parse_known_args()[0]
+        return model_args
+
+
+class HLSTM_tdscale(nn.Module):
+    
+    model_type = "HLSTM_tdscale"
+
+    def __init__(self,
+                    input_shape=(6,),
+                    output_shape=(2,),
+                    hidden_dim:int=64,
+                    num_layers:int=2, 
+                    dropoutw:float=0.35,
+                    p_variable_model:bool=False,
+                    zero_inflated_model:bool=False,
+                    
+                    #Attn params
+                    lookback:int = 7,
+                    tfactor:int = 4,
+                     ) -> None:
+        """[summary]
+
+        Args:
+            input_shape (tuple, optional): [description]. Defaults to (6,).
+            output_shape (tuple, optional): [description]. Defaults to (2,).
+            hidden_dim (int, optional): [Dimensions of hidden layers in model]. Defaults to 32.
+            num_layers (int, optional): [Number of layers in neural network]. Defaults to 2.
+            p_variable_model (bool, optional): [Whether or not we use a p variable type model]. Defaults to False.
+            zero_inflated_model (bool, optional): [Whether or not we use a zero inflated model]. Defaults to False.
+        """
+        super().__init__()
+
+        self.input_shape = input_shape
+        self.output_shape = output_shape
+        self.p_variable_model = p_variable_model
+        self.zero_inflated_model = zero_inflated_model
+
+        self.upscale = nn.Sequential( 
+                            nn.Linear( 
+                                *(self.input_shape if len(self.input_shape)==1 else self.input_shape[-1:]), 
+                                hidden_dim, bias=False ) )
+
+
+        self.encoder = nn.Sequential(
+                        *[SkipConnectionLSTM(LSTM( input_size=hidden_dim, hidden_size=hidden_dim, num_layers=num_layers//2,
+                            dropouti=0.25, dropoutw=dropoutw, dropouto=0.25, batch_first=True, proj_size=hidden_dim//2,
+                            bidirectional=True)) for n in range(num_layers//2)],
+            ExtractLSTMOutputFeatures(elem="all")
+        )
+        
+        self.outp_mu_tdscale = TemporalDownScaleAttention( lookback, tfactor, hidden_dim, 4, 0.15, False)
+        self.outp_mu = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), 
+                                        nn.GELU(),
+                                        nn.Linear(hidden_dim, 
+                                                    *(self.output_shape if len(self.output_shape)==1 else self.output_shape[-1:]),
+                                                     bias=True)                                        
+                                         )
+
+        self.outp_dispersion_tdscale = TemporalDownScaleAttention( lookback,tfactor, hidden_dim, 4, 0.15, False)
+        self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), 
+                                            nn.GELU(),
+                                            nn.Linear(hidden_dim,
+                                                     *(self.output_shape if len(self.output_shape)==1 else self.output_shape[-1:]),
+                                                      bias=True) )
+
+        
+
+        if self.p_variable_model:
+            self.p_tdscale = TemporalDownScaleAttention( lookback, tfactor, hidden_dim, 4, 0.15, False)
+
+            self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim, hidden_dim, bias=False),
+                                                    nn.GELU(),
+                                                     nn.Linear(hidden_dim,
+                                                     *(self.output_shape if len(self.output_shape)==1 else self.output_shape[-1:]),
+                                                     bias=True) )
+
+    def forward(self, x, standardized_output=True):
+        x = self.upscale(x)
+        h = self.encoder(x)
+
+        output = {}
+
+        hm = self.outp_mu_tdscale(h)
+        output['mu'] = self.outp_mu(hm)
+
+        hd = self.outp_dispersion_tdscale(h)
+        output['disp'] = self.outp_dispersion(hd)
+
+        if self.p_variable_model:
+            hp = self.p_tdscale(h)
+            output['logits'] = self.outp_logitsrain(hp)
+        
+        return output
+    
+    @staticmethod
+    def parse_model_args(parent_parser):
+        parser = argparse.ArgumentParser(
+            parents=[parent_parser], add_help=True, allow_abbrev=False)
+
+        parser.add_argument("--num_layers", default=4, type=int)
+        parser.add_argument("--hidden_dim", default=64, type=int)
+        parser.add_argument("--dropoutw", default=0.35, type=float)
+        
             
         model_args = parser.parse_known_args()[0]
         return model_args
@@ -131,7 +252,55 @@ class SkipConnectionLSTM(nn.Module):
 
         return outp, hx
 
+class TemporalDownScaleAttention(nn.Module):
+
+    def __init__(self,
+        num_embeddings,
+        tfactor,
+        embedding_dim,
+        num_heads,
+        dropout,
+        bias,
+
+    ) -> None:
+        super().__init__()
+
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.tfactor = tfactor
+        self.pos_emb = nn.Embedding( self.tfactor,
+                            embedding_dim )
+        self.register_buffer('indices', torch.range(0,self.tfactor-1, dtype=torch.long))
+
+        self.mha = nn.MultiheadAttention(
+                        embedding_dim,
+                        num_heads = num_heads,
+                        dropout = dropout,
+                        bias = bias,
+                        batch_first=True,
+        )   
+
+    def forward(self, x):
+        
+        orig_shape = x.shape
+
+        pos_embd = self.pos_emb(self.indices)
+
+        
+
+        x = x.reshape(-1, self.tfactor, self.embedding_dim)
+        embd = x + pos_embd
+        query = embd.mean(dim=-2,keepdim=True)
+        outp = self.mha(query=query,
+                        key=embd,
+                        value=embd,
+                        need_weights=False,
+                        )[0]
+        outp = outp.view( orig_shape[0], self.num_embeddings, self.embedding_dim  )
+
+        return outp
 
 MAP_NAME_NEURALMODEL = {
-    'HLSTM': HLSTM
+    'HLSTM': HLSTM,
+    'HLSTM_tdscale':HLSTM_tdscale
 }

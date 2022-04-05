@@ -1,3 +1,8 @@
+from genericpath import exists
+from tokenize import String
+from attr import has
+from netCDF4 import Dataset as nDataset
+from aiohttp import worker
 from functools import lru_cache
 import numpy as np
 import pandas as pd
@@ -14,10 +19,17 @@ import os
 import ujson
 import pickle
 import regex  as re
-from typing import Tuple, Callable,  Union, Dict
+from typing import Tuple, Callable,  Union, Dict, List, TypeVar
 from torchtyping import TensorDetail,TensorType
 import argparse
 import json
+import ujson
+import xarray as xr
+import itertools as it
+import glob
+from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
+from torch.utils.data import IterableDataset
+import random
 
 """
     dataloaders.py provides functionality for loading in the following Datasets:
@@ -64,11 +76,11 @@ class ToyDataset(Dataset):
         MAP_DISTR_SAMPLE = {
             'uniform': lambda lb, ub: td.Uniform(lb, ub),
             
-            'mv_uniform': lambda lb=0, ub=1 : td.Independent( td.Uniform(lb, ub), 1 ),
+            'mv_uniform': lambda lb=0, ub=1:td.Independent( td.Uniform(lb, ub), 1 ),
 
             'mv_normal': lambda loc=torch.zeros((6,)), covariance_matrix=torch.eye(6): td.MultivariateNormal( loc , covariance_matrix ),
             
-            'mv_lognormal': lambda loc=torch.zeros((6,)), scale=torch.ones( (6,) ) : td.Independent( td.LogNormal( loc , scale ), 1 )
+            'mv_lognormal': lambda loc=torch.zeros((6,)), scale=torch.ones( (6,) ):td.Independent( td.LogNormal( loc , scale ), 1 )
 
         }
 
@@ -427,7 +439,7 @@ class AustraliaRainDataset(Dataset):
             
 
             # Scaling Features
-            # TODO: Ensure scaler features is only trained on training set
+            #:Ensure scaler features is only trained on training set
             scaler_features = StandardScaler()
 
             types_aux = pd.DataFrame(features_raw.dtypes)
@@ -560,4 +572,1053 @@ class AustraliaRainDataset(Dataset):
         data_args = parser.parse_known_args()[0]
         return data_args
 
-MAP_NAME_DSET = {'toy':ToyDataset, 'australia_rain':AustraliaRainDataset}
+# region -- Era5_Eobs
+class Generator():
+    """
+        Base class for Generator classes
+        Example of how to use:
+            fn = "Data/Rain_Data/rr_ens_mean_0.1deg_reg_v20.0e_197901-201907_djf_uk.nc"
+            rain_gen = Generator_rain(fn, all_at_once=True)
+            datum = next(iter(grib_gen))
+    """
+    
+    def __init__(self, fp, lookback, iter_chunk_size
+                    ,all_at_once=False, start_idx=0, end_idx=None
+                    ):
+        """Extendable Class handling the generation of model field and rain data
+            from E-Obs and ERA5 datasets
+
+        Args:
+            fp (str): Filepath of netCDF4 file containing data.
+            all_at_once (bool, optional): Whether or not to load all the data in RAM or not. Defaults to False.
+            start_idx (int, optional): Skip the first start_idx elements of the dataset
+            
+        """ 
+        assert iter_chunk_size%lookback== 0, "Iter chunk size must be a multiple of lookback\
+             to ensure that the samples we pass to the LSTM can be transformed to the correct shape"
+
+        self.generator = None
+        self.all_at_once = all_at_once
+        self.fp = fp
+        self.city_latlon = {
+            "London": [51.5074, -0.1278],
+            "Cardiff": [51.4816 + 0.15, -3.1791 -0.05], #1st Rainiest
+            "Glasgow": [55.8642,  -4.2518], #3rd rainiest
+            "Lancaster":[54.466, -2.8007], #2nd hieghest
+            "Bradford": [53.7960, -1.7594], #3rd highest
+            "Manchester":[53.4808, -2.2426], #15th rainiest
+            "Birmingham":[52.4862, -1.8904], #25th
+            "Liverpool":[53.4084 , -2.9916 +0.1 ], #18th rainiest
+            "Leeds":[ 53.8008, -1.5491 ], #8th
+            "Edinburgh": [55.9533, -3.1883],
+            "Belfast": [54.5973, -5.9301], #25
+            "Dublin": [53.3498, -6.2603],
+            "LakeDistrict":[54.4500,-3.100],
+            "Newry":[54.1751, -6.3402],
+            "Preston":[53.7632, -2.7031 ],
+            "Truro":[50.2632, -5.0510],
+            "Bangor":[54.2274 - 0, -4.1293 - 0.3],
+            "Plymouth":[50.3755 + 0.1, -4.1427],
+            "Norwich": [52.6309, 1.2974],
+            "StDavids":[51.8812+0.05, -5.2660+0.05] ,
+            "Swansea":[51.6214+0.05,-3.9436],
+            "Lisburn":[54.5162,-6.058],
+            "Salford":[53.4875, -2.2901],
+            "Aberdeen":[57.1497,-2.0943-0.05],
+            "Stirling":[56.1165, -3.9369],
+            "Hull":[53.7676+0.05, 0.3274]
+            }
+        
+        #The longitude lattitude grid for the 0.1 degree E-obs and rainfall data
+        self.latitude_array = np.linspace(58.95, 49.05, 100)
+        self.longitude_array = np.linspace(-10.95, 2.95, 140)
+        
+        # Retrieving information on temporal length of  dataset        
+        with nDataset(self.fp, "r+", format="NETCDF4") as ds:
+            if 'time' in ds.dimensions:
+                self.max_data_len = ds.dimensions['time'].size
+            else:
+                raise NotImplementedError
+        
+        self.lookback = lookback
+        self.start_idx = start_idx
+        self.end_idx = end_idx if end_idx else self.start_idx + self.max_data_len
+        
+        # Ensuring we end_idx is a multiple of lookback away
+        self.end_idx = self.start_idx+ int(((self.end_idx-self.start_idx)//self.lookback)*self.lookback )
+
+        self.data_len_per_location = self.end_idx - self.start_idx
+
+        self.iter_chunk_size = iter_chunk_size
+        
+                
+    def yield_all(self):
+        pass
+
+    def yield_iter(self):
+        pass
+    
+    def __call__(self, ):
+        if(self.all_at_once):
+            return self.yield_all()
+        else:
+            return self.yield_iter()
+
+    def find_idxs_of_loc(self, loc="London"):
+        """Returns the grid indexes on the 2D map of the UK which correspond to the location (loc) point
+
+        Args:
+            loc (str, optional): name of the location. Defaults to "London".
+
+        Returns:
+            tuple: Contains indexes (h1,w1) for the location (loc)
+        """        
+        coordinates = self.city_latlon[loc]
+        indexes = self.find_nearest_latitude_longitude( coordinates)  # (1,1)
+        return indexes
+
+    def find_idx_of_loc_region(self, loc, dconfig):
+        """ Returns the the indexes defining gridded box that surrounds the location of interests
+
+            Raises:
+                ValueError: [If the location of interest is too close to the border for evaluation]
+
+            Returns:
+                tuple: Returns a tuple ( [upper_h, lower_h], [left_w, right_w] ), defining the grid box that 
+                    surrounds the location (loc)
+        """
+        
+        city_idxs = self.find_idxs_of_loc(loc) #[h,w]
+        
+        # Checking that central region of interest is not too close to the border
+        bool_regioncheck1 = np.array(city_idxs) <  np.array(dconfig.outer_box_dims) - np.array(dconfig.inner_box_dims)
+        bool_regioncheck2 = np.array(dconfig.original_uk_dim) - np.array(city_idxs) < np.array(dconfig.inner_box_dims)
+        if bool_regioncheck1.any() or bool_regioncheck2.any(): raise ValueError("The specified region is too close to the border")
+
+        # Defining the span, in all directions, from the central region
+        if( dconfig.outer_box_dims[0]%2 == 0 ):
+            h_up_span = dconfig.outer_box_dims[0]//2 
+            h_down_span = h_up_span
+        else:
+            h_up_span = dconfig.outer_box_dims[0]//2
+            h_down_span = dconfig.outer_box_dims[0]//2 + 1
+
+        if( dconfig.outer_box_dims[1]%2 == 0 ):
+            w_left_span = dconfig.outer_box_dims[1]//2 
+            w_right_span = w_left_span
+        else:
+            w_left_span = dconfig.outer_box_dims[1]//2
+            w_right_span = dconfig.outer_box_dims[1]//2 + 1
+        
+        #Defining outer_boundaries
+        upper_h = city_idxs[0] - h_up_span
+        lower_h = city_idxs[0] + h_down_span
+
+        left_w = city_idxs[1] - w_left_span
+        right_w = city_idxs[1] + w_right_span
+        
+        return ( [upper_h, lower_h], [left_w, right_w] )
+
+    def find_nearest_latitude_longitude(self, lat_lon):
+        """Given specific lat_lon, this method finds the closest long/lat points on the
+            0.1degree grid our input/target data is defined on
+
+        Args:
+            lat_lon (tuple): tuple containing the lat and lon values of interest
+
+        Returns:
+            tuple: tuple containing the idx_h and idx_w values that detail the posiiton on lat_lon on the 
+                0.1degree grid on which the ERA5 and E-Obvs data is defined
+        """        
+        latitude_index =    np.abs(self.latitude_array - lat_lon[0] ).argmin()
+        longitude_index =   np.abs(self.longitude_array - lat_lon[1]).argmin()
+
+        return (latitude_index, longitude_index)
+    
+    def get_locs_for_whole_map(self, dconfig, shuffle=False):
+        """This function returns a list of boundaries which can be used to extract all patches
+            from the 2D map. 
+
+            Args:
+                region_grid_params (dictionary): a dictioary containing information on the sizes of 
+                    patches to be extract from the main image
+
+            Returns:
+                list:return a list of of tuples defining the boundaries of the region
+                        of the form [ ([upper_h, lower_h]. [left_w, right_w]), ... ]
+            If we do have a stride then shuffle changes which set of points we pick at each round of iteration
+        """      
+
+        original_uk_dim = dconfig.original_uk_dim
+        h_shift = dconfig.vertical_shift
+        w_shift = dconfig.horizontal_shift
+        h_span, w_span = dconfig.outer_box_dims
+
+        #list of values for upper_h and lower_h
+        h_start_idx = 0 if not shuffle else random.randint(0, h_shift-1)
+        range_h = np.arange(h_start_idx, original_uk_dim[0]-h_span+1, step=h_shift, dtype=np.int32 ) 
+        # list of pairs of values (upper_h, lower_h)
+        li_range_h_pairs = [ [range_h[i], range_h[i]+h_span] for i in range(0,len(range_h))]
+        
+        #list of values for left_w and right_w
+        w_start_idx = 0 if not shuffle else random.randint(0, w_shift-1)
+        range_w = np.arange(w_start_idx, original_uk_dim[1]-w_span+1, step=w_shift, dtype=np.int32)
+        # list of pairs of values (left_w, right_w)
+        li_range_w_pairs = [ [range_w[i], range_w[i]+w_span ] for i in range(0,len(range_w))]
+
+        li_boundaries = list( it.product( li_range_h_pairs, li_range_w_pairs ) )
+
+        # The list of boundaries to remove assumes that we are using a 16by16 outer grid with a 4by4 inner grid
+        invalid_points = {
+            0:list(range(0,48+1))+list(range(64,140+1)), 1:list(range(0,48+1))+list(range(64,140+1)), 2:list(range(0,48+1))+list(range(64,140+1)), 3:list(range(0,48+1))+list(range(64,140+1)), 4:list(range(0,48+1))+list(range(64,140+1)), 5:list(range(0,48+1))+list(range(64,140+1)), 
+            
+            #6-9
+            6:list(range(0,48+1))+list(range(64,140+1)), 7:list(range(0,48+1))+list(range(64,140+1)), 8:list(range(0,48+1))+list(range(64,140+1)), 9:list(range(0,48+1))+list(range(64,140+1)),
+
+            #10-13
+            10: list(range(0,48+1))+list(range(96,140+1)), 11: list(range(0,48+1))+list(range(76,140+1)), 12 :list(range(0,48+1))+list(range(76,140+1)), 13 :list(range(0,48+1))+list(range(76,140+1)),
+
+            #14-17
+            14:list(range(0,48+1))+list(range(96,140+1)), 15:list(range(0,48+1))+list(range(96,140+1)), 16:list(range(0,48+1))+list(range(96,140+1)), 17:list(range(0,48+1))+list(range(96,140+1)),
+
+            #18-21
+            18:list(range(0,48+1))+list(range(96,140+1)), 19:list(range(0,48+1))+list(range(96,140+1)), 20:list(range(0,48+1))+list(range(96,140+1)), 21:list(range(0,48+1))+list(range(96,140+1)),
+
+            #22-25
+            22:list(range(0,48+1))+list(range(96,140+1)), 23:list(range(0,48+1))+list(range(96,140+1)), 24:list(range(0,48+1))+list(range(96,140+1)), 25:list(range(0,48+1))+list(range(96,140+1)),
+
+            #26-29
+            26:list(range(0,48+1))+list(range(96,140+1)), 27:list(range(0,48+1))+list(range(96,140+1)), 28:list(range(0,48+1))+list(range(96,140+1)), 29:list(range(0,48+1))+list(range(96,140+1)),
+
+            #30-33
+            30:list(range(0,48+1))+list(range(100,140+1)), 31:list(range(0,48+1))+list(range(100,140+1)), 32:list(range(0,48+1))+list(range(100,140+1)), 33:list(range(0,48+1))+list(range(100,140+1)),
+
+            #34-37
+            34:list(range(100,140+1)), 35:list(range(100,140+1)), 36:list(range(100,140+1)), 37:list(range(100,140+1)),
+
+            #38-41
+            38:list(range(104,140+1)), 39:list(range(104,140+1)), 40:list(range(104,140+1)), 41:list(range(104,140+1)),
+
+            #42-45
+            42:list(range(108,140+1)), 43:list(range(108,140+1)), 44:list(range(108,140+1)), 45:list(range(108,140+1)),
+
+            #46-49
+            46:list(range(112,140+1)), 47:list(range(112,140+1)), 48:list(range(112,140+1)), 49:list(range(112,140+1)),
+
+            #50-53
+            50:list(range(120,140+1)), 51:list(range(120,140+1)), 48:list(range(120,140+1)), 49:list(range(120,140+1)),
+
+            #54-57
+            54:list(range(120,140+1)), 55:list(range(120,140+1)), 56:list(range(120,140+1)), 57:list(range(120,140+1)),
+
+            #58-61
+            58:list(range(120,140+1)), 59:list(range(120,140+1)), 60:list(range(120,140+1)), 61:list(range(120,140+1)),
+
+            #86-89
+            86:list(range(0,40+1)), 87:list(range(0,40+1)), 88:list(range(0,40+1)), 89:list(range(0,40+1)),
+
+            #90-93
+            90:list(range(0,40+1)), 91:list(range(0,40+1)), 92:list(range(0,40+1)), 93:list(range(0,40+1)),
+
+            #94-100
+            94:list(range(0,40+1)), 95:list(range(0,40+1)), 96:list(range(0,40+1)), 97:list(range(0,40+1)), 98:list(range(0,40+1)), 99:list(range(0,40+1)), 100:list(range(0,40+1))
+
+        }
+
+        filtered_boundaries = []
+        
+        # We filter away obvious training points which are over water
+        for h_span, w_span in li_boundaries:
+            
+            # Find the list of points for ignored points based on the h_posiiton
+            relevant_hidxs = [hidx for hidx in invalid_points.keys() if (hidx>=h_span[0] and hidx<=h_span[1]) ]
+
+            if len(relevant_hidxs)==0: 
+                continue
+            relevant_wspans = sum( [invalid_points[hidx] for hidx in relevant_hidxs], [] )
+
+            relevant_wspans = list(set(relevant_wspans))
+
+            w_span_range = list(range(w_span[0], w_span[1]+1))
+
+            # We check if all idxs in w_span are valid, if so we add to filtered_boundaries
+            if  all( (widx not in relevant_wspans) for widx in w_span_range ):
+                filtered_boundaries.append( (h_span,w_span) )
+            else:
+                pass
+
+        return filtered_boundaries
+
+class Generator_rain(Generator):
+    """ A generator for E-obs 0.1 degree rain data
+    
+    Returns:
+        A python generator for the rain data
+        
+    """
+    def __init__(self, **generator_params ):
+        super(Generator_rain, self).__init__(**generator_params)
+        
+    def yield_all(self):
+        """ Return all data at once
+        """
+        raise NotImplementedError
+        with Dataset(self.fp, "r", format="NETCDF4",keepweakref=True) as ds:
+            _data = ds.variables['rr'][:]
+            yield np.ma.getdata(_data), np.ma.getmask(_data)   
+            
+    def yield_iter(self):
+        """ Return data in chunks"""
+
+        # xr_gn = xr.open_dataset( self.fp, cache=False, decode_times=False, decode_cf=False)
+        with xr.open_dataset( self.fp, cache=False, decode_times=False, decode_cf=False) as xr_gn:
+            idx = copy.deepcopy(self.start_idx)
+            # final_idx =  min( self.start_idx+self.data_len_per_location, self.end_idx) 
+            # # Same affect as drop_last = True. Ensures that we extract segments with size a mulitple of lookback
+            # final_idx = int( self.start_idx + ((final_idx)//self.lookback)*self.lookback )
+            # self.data_len_per_location = (final_idx- self.start_idx)
+            
+            #TODO: Since we are doing strides of lookback length,
+                # then add a shuffle ability where we adjust the start idx by up to lookback length so the idx is moved back by at most lookback
+            while idx < self.end_idx:
+
+                adj_iter_chunk_size = min(self.iter_chunk_size, (self.end_idx-idx) )
+            
+                slice_t = slice( idx , idx+adj_iter_chunk_size )
+                slice_h = slice( None , None, -1 )
+                slice_w = slice( None, None )
+
+                marray = xr_gn.isel(time=slice_t ,latitude=slice_h, longitude=slice_w)['rr'].to_masked_array(copy=True)
+                array,mask = np.ma.getdata(marray), np.ma.getmask(marray)
+
+                mask = (array==9.969209968386869e+36)
+                
+                idx+=adj_iter_chunk_size
+
+                yield array, mask
+
+    def __call__(self):
+        return self.yield_iter()
+    
+    __iter__ = yield_iter
+    
+class Generator_mf(Generator):
+    """Creates a generator for the model_fields_dataset
+    """
+
+    def __init__(self, vars_for_feature, **generator_params):
+        """[summary]
+
+        Args:
+            generator_params:list of params to pass to base Generator class
+        """        
+        super(Generator_mf, self).__init__(**generator_params)
+
+        self.vars_for_feature = vars_for_feature #['unknown_local_param_137_128', 'unknown_local_param_133_128', 'air_temperature', 'geopotential', 'x_wind', 'y_wind' ]       
+        # self.start_idx = 0
+        # self.end_idx =0 
+        #self.ds = Dataset(self.fp, "r", format="NETCDF4")
+
+    def yield_all(self):
+        
+        xr_gn = xr.open_dataset(self.fp, cache=False, decode_times=False, decode_cf=False)
+
+        slice_t = slice( self.start_idx , self.end_idx )
+        slice_h = slice(1,103-2 )
+        slice_w = slice(2,144-2)
+        
+        xr_gn =  xr_gn.isel(time=slice_t, latitude=slice_h, longitude=slice_w)
+        
+        return xr_gn
+
+    def yield_iter(self):
+        # xr_gn = xr.open_dataset(self.fp, cache=False, decode_times=False, decode_cf=False, cache=False)
+        with xr.open_dataset(self.fp, cache=False, decode_times=False, decode_cf=False) as xr_gn:
+            idx = copy.deepcopy(self.start_idx)
+
+            while idx < self.end_idx:
+
+                adj_iter_chunk_size = min(self.iter_chunk_size, self.end_idx-idx )
+
+                _slice = slice( idx , idx  + adj_iter_chunk_size)
+                next_marray = [ xr_gn[name].isel(time=_slice).to_masked_array(copy=True) for name in self.vars_for_feature ]
+                
+                list_datamask = [(np.ma.getdata(_mar), np.ma.getmask(_mar)) for _mar in next_marray]
+                
+                _data, _masks = list(zip(*list_datamask))
+                # _masks = [ np.logical_not(_mask_val) for _mask_val in _masks] 
+                stacked_data = np.stack(_data, axis=-1)
+                stacked_masks = np.stack(_masks, axis=-1)
+
+                idx += adj_iter_chunk_size
+                
+                yield stacked_data[ :, 1:-2, 2:-2, :], stacked_masks[ :, 1:-2 , 2:-2, :] #(100,140,6) 
+
+    __iter__ = yield_iter 
+class Era5EobsDataset(IterableDataset):
+
+    def __init__(self, dconfig, start_date, end_date, target_range,
+     locations=None, loc_count=None, 
+     scaler_features=None, scaler_target=None, workers=1,
+     shuffle=False, **kwargs ) -> None:
+        super(Era5EobsDataset).__init__()
+
+        self.dconfig = dconfig
+        self.target_range = target_range
+        self.locations = locations if locations else dconfig.locations
+        self.locations_test = dconfig.locations_test
+        self.loc_count = loc_count if loc_count else dconfig.loc_count
+        self.end_date = end_date
+        start_idx_feat, start_idx_tar = self.get_idx(start_date)
+        end_idx_feat, end_idx_tar = self.get_idx(end_date)
+        self.gen_size = kwargs.get('gen_size',None)
+        self.workers = workers
+        self.shuffle = shuffle
+        
+        # region Checking for pre-existing scalers - If not exists we create in next section
+        try:
+            #DEBUGGIN rainer_dir = kwargs.get('trainer_dir',None) 
+            trainer_dir="Checkpoints/uk_rain_DGLM_HLSTM_tdscale_gamma_hurdle/lightning_logs/version_0"
+            # trainer_dir = kwargs.get('trainer_dir')
+            self.scaler_features = scaler_features if scaler_features != None else pickle.load( open( os.path.join(trainer_dir,"scaler_features.pkl"),"rb") ) 
+            self.scaler_target = scaler_target if scaler_target != None else pickle.load( open( os.path.join(trainer_dir,"scaler_target.pkl"),"rb") ) 
+        except (FileExistsError, FileNotFoundError, Exception) as e:
+            self.scaler_features = None
+            self.scaler_target = None
+        # endregion
+        
+        # region Checking for cache of dataset 
+        premade_dset_path = os.path.join('Data','uk_rain','premade_dset_record.txt')
+        if os.path.exists(premade_dset_path):
+            premade_dsets = pd.read_csv( premade_dset_path)
+        else:
+            premade_dsets = pd.DataFrame( columns=['cache_path','scaler_path','start_date','end_date','locations','lookback',
+                                                    'target_distribution_name','target_range'] )
+
+        # Query for if cache for dataset and normalizer
+        query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' and \
+                                    locations == '{'_'.join([loc[:3] for loc in self.locations])}' and \
+                                    lookback == {str(self.dconfig.lookback_target)} and \
+                                    target_range == '{','.join(map(str,target_range))}'")
+        
+        #If it exists we just load it
+        if len(query_res)!=0:
+            self.cache_exists = True
+            self.cache_path = query_res['cache_path'].iloc[0]
+        
+            # Otherwise set up parameters to use the normal dataset
+        else:
+            # Create python generator for rain data
+            fp_rain = self.dconfig.data_dir+"/"+self.dconfig.rain_fn
+            
+            
+            self.rain_data = Generator_rain(fp=fp_rain,
+                                            all_at_once=False,
+                                            iter_chunk_size=self.dconfig.lookback_target*self.gen_size,
+                                            lookback=self.dconfig.lookback_target,
+                                            start_idx=start_idx_tar,
+                                            end_idx = end_idx_tar
+                                            )
+
+            # Create python generator for model field data 
+            mf_fp = self.dconfig.data_dir + "/" + self.dconfig.mf_fn
+            self.mf_data = Generator_mf(fp=mf_fp, vars_for_feature=self.dconfig.vars_for_feature, 
+                                        all_at_once=False, 
+                                        iter_chunk_size=self.dconfig.lookback_feature*self.gen_size,
+                                        lookback=self.dconfig.lookback_feature,
+                                        start_idx=start_idx_feat,
+                                        end_idx = end_idx_feat)
+            
+            
+            os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
+            self.cache_path = os.path.join( self.dconfig.data_dir, "cache",
+                f"start-{start_date}-end-{end_date}_lookbacktarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-locs-{'_'.join([loc[:3] for loc in self.locations])}")
+            self.cache_exists = os.path.exists(self.cache_path)
+        # endregion
+
+        #Finally if any of cache or scalers don't exists we create the non existent ones
+        if not self.cache_exists or self.scaler_features == None or self.scaler_target ==  None:
+            self.create_cache_scaler()
+            self.create_cache_params()
+            
+            premade_dsets.append( { 
+                'cache_path':self.cache_path,
+                'start_date':start_date,
+                'end_date':end_date,
+                'locations':'_'.join([loc[:3] for loc in self.locations]),
+                'lookback':str(self.dconfig.lookback_target),
+                'target_range':','.join(map(str,target_range))
+            }, ignore_index=True)
+            
+            premade_dsets.to_csv( premade_dset_path, index=False)
+        
+        elif self.cache_exists:
+            self.create_cache_params()
+                    
+        # Create buffers for scaler params
+        self.features_scale = torch.as_tensor( self.scaler_features.scale_ )
+        self.features_mean = torch.as_tensor( self.scaler_features.mean_ )
+        self.target_scale = torch.as_tensor( self.scaler_target.scale_ )
+
+    @staticmethod
+    def get_dataset( dconfig, target_range, target_distribution_name,**kwargs):
+
+        ds_train = Era5EobsDataset( start_date = dconfig.train_start,end_date=dconfig.train_end,
+                                    target_distribution_name=target_distribution_name,
+                                    target_range=target_range, dconfig=dconfig, 
+                                    shuffle=True,**kwargs )
+        
+
+        ds_val = Era5EobsDataset( start_date = dconfig.val_start, end_date=dconfig.val_end,
+                                    dconfig=dconfig,
+                                    target_range=target_range,
+                                    target_distribution_name=target_distribution_name,
+                                    scaler_features = ds_train.scaler_features,
+                                    scaler_target = ds_train.scaler_target,
+                                    shuffle=False,
+                                    **kwargs)
+
+        assert dconfig.locations_test != ["All"], "Can not test over Whole map. please provided cities"
+        ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
+                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count,
+                                    dconfig=dconfig,
+                                    target_range=target_range,
+                                    target_distribution_name=target_distribution_name,
+                                    scaler_features = ds_train.scaler_features,
+                                    scaler_target = ds_train.scaler_target,
+                                    shuffle=False,
+                                    **kwargs)
+
+        return ds_train, ds_val, ds_test, ds_train.scaler_features, ds_train.scaler_target
+
+    def __iter__(self):
+
+        if self.cache_exists and self.scaler_features and self.scaler_target:
+            # if hasattr(self, 'rain_data'): del self.rain_data
+            # if hasattr(self, 'mf_data'): del self.mf_data               
+
+            with xr.open_dataset( self.cache_path, cache=False ) as xr_cache:
+                # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
+                
+                if not hasattr(self, 'max_cache_len'):
+                    # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
+                    self.max_cache_len = xr_cache["sample_idx"].shape[0]
+
+                # Making sure its a multiple of lookback away from start idx
+                if not hasattr(self, 'cache_start_idx'):
+                    self.cache_start_idx = 0
+
+                if not hasattr(self, 'cache_end_idx'):
+                    self.cache_end_idx = 0 + int(((self.max_cache_len - self.cache_start_idx)//self.lookback)*self.lookback )
+
+                if not hasattr(self, 'cache_len'):
+                    self.cache_len = self.cache_end_idx + 1 - self.cache_start_idx
+                
+                # Adding Shuffling
+                # This is shuffling in sequence of days we pass to the model
+                if self.shuffle:
+                    # We adjust the start idx of model field and rain data
+                    #TODO: Adjust for multiple worker
+                    
+                    remainder_elements = self.max_cache_len % self.dconfig.lookback_target
+                    self.start_idx_increment = random.randint(0, self.dconfig.lookback_target)
+                    
+                    if self.start_idx_increment > remainder_elements:
+                        # Then we reduce the cache_end_idx and cache_len
+                        self.cache_start_idx += self.start_idx_increment
+                        self.cache_end_idx += ( remainder_elements - self.dconfig.lookback_target) 
+                        self.cache_len += self.cache_start_idx - self.cache_end_idx
+                    
+                    elif self.start_idx_increment <= remainder_elements:
+                        self.cache_start_idx += self.start_idx_increment
+                        self.cache_end_idx  += self.start_idx_increment
+                        self.cache_len = self.cache_len
+                
+                else:
+                    self.start_idx_increment = 0
+                
+                idx = copy.deepcopy(self.cache_start_idx)
+
+                while idx < self.cache_end_idx :
+                    adj_iter_chunk_size = min( self.gen_size, self.cache_end_idx-idx )
+
+                    _slice = slice( idx , idx  + adj_iter_chunk_size)
+                    dict_data = { name:torch.tensor( xr_cache[name].isel(sample_idx=_slice).data )
+                                    for name in ['input','target','mask','idx_loc_in_region'] }
+                    
+                    dict_data['input'] = (dict_data['input'] - self.features_mean )/self.features_scale
+                    dict_data['target'] = dict_data['target']*self.target_scale
+                    
+                    #scaling
+                    dict_data['input'] = dict_data['input'].to(torch.float16).squeeze()
+                    dict_data['target'] = dict_data['target'].to(torch.float16).squeeze()
+                    dict_data['mask'] = dict_data['mask'].to(torch.bool).squeeze()
+
+                    dict_data ={ k:v for k,v in dict_data.items()}
+
+                    idx += adj_iter_chunk_size
+                    # yield dict_data        
+
+                    if type(dict_data['input'])==tuple:
+                        li_dicts = [ {key:dict_data[key][idx].unsqueeze(0) for key in dict_data.keys() }for idx in range(len(dict_data['target'])) ]
+                        yield from li_dicts
+                        
+                    elif adj_iter_chunk_size==1:
+                        dict_data['idx_loc_in_region'] = dict_data['idx_loc_in_region'].squeeze(0)
+                        yield from [ {k:v.unsqueeze(0) for k,v in dict_data.items()} ]
+                    
+                    else:
+                        _ =  {k:v.unbind() for k,v in dict_data.items()} 
+                        li_dicts = [ {key:_[key][idx].unsqueeze(0) for key in dict_data.keys() } for idx in range(len(dict_data['target'])) ]
+                        yield from li_dicts
+                        
+        else: 
+            print("Note: User is using non cached dataset. The data will not be normalized automatically")
+            sample_idx = 0
+            # We calculate the maximum number of samples as the start_idx - end_idx // self.lookback for each generator
+            sample_max_len = min( [ (gen.data_len_per_location)//gen.lookback for gen in [self.mf_data, self.rain_data]] )
+
+            if self.scaler_features == None: 
+                self.scaler_features = StandardScaler()
+                bool_update_scaler_features = True
+            else:
+                bool_update_scaler_features = False
+
+            if self.scaler_target ==None: 
+                self.scaler_target = MinMaxScaler(feature_range=self.target_range)
+                bool_update_scaler_target = True
+            else:
+                bool_update_scaler_target = False
+            
+            for idx, ( (feature, feature_mask), (target, target_mask) ) in enumerate( zip( self.mf_data, self.rain_data)):
+
+                dict_data = self.preprocess_batch(feature, feature_mask, target, target_mask, normalize=False)
+
+                #Developing Data Cache and Scalers
+                if not self.cache_exists:
+                    kwargs ={ 
+                        "data_vars":{
+                                "input":( ("sample_idx","lookback_feature","h_feat","w_feat","d"), torch.concat(dict_data['input']).numpy() ),
+                                "target": ( ("sample_idx","lookback_target","h_target","w_target"),torch.concat(dict_data['target']).numpy() ),
+                                "mask": ( ("sample_idx","lookback_target","h_target","w_target"),torch.concat(dict_data['mask']).numpy() ),
+                                "idx_loc_in_region": ( ("sample_idx","h_w"), np.concatenate(dict_data['idx_loc_in_region'])) 
+                                 }
+                            }
+                                           
+                    if not os.path.exists(self.cache_path):
+                        
+                        coords = {
+                            "sample_idx": np.arange( torch.concat(dict_data['input']).shape[0] ),
+                            "lookback_feat": np.arange( self.dconfig.lookback_feature),
+                            "lookback_target": np.arange( self.dconfig.lookback_target),
+                            "h_feat": np.arange( dict_data['input'][0].shape[-3]),
+                            "w_feat": np.arange( dict_data['input'][0].shape[-2]),
+                            "d": np.arange( dict_data['input'][0].shape[-1]),
+                            "h_target": np.arange( dict_data['target'][0].shape[-2]),
+                            "w_target": np.arange( dict_data['target'][0].shape[-1]),
+                            "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] )
+                            }
+                        kwargs['coords'] = coords
+                        xr_curr = xr.Dataset( **kwargs )
+                        xr_curr.to_netcdf(self.cache_path )
+
+                    else:
+                        with xr.open_dataset( self.cache_path, cache=False ) as xr_prev:
+                            kwargs['coords'] = {
+                                "sample_idx": np.arange( xr_prev.dims['sample_idx'], xr_prev.dims['sample_idx']+torch.concat(dict_data['input']).shape[0]  ),
+
+                                "lookback_feat": np.arange( self.dconfig.lookback_feature),
+                                "lookback_target": np.arange( self.dconfig.lookback_target),
+
+                                "h_feat": np.arange( dict_data['input'][0].shape[-3]),
+                                "w_feat": np.arange( dict_data['input'][0].shape[-2]),
+
+                                "h_target": np.arange( dict_data['target'][0].shape[-2]),
+                                "w_target": np.arange( dict_data['target'][0].shape[-1]),
+                                "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] ),
+
+                                "d": np.arange( dict_data['input'][0].shape[-1]),
+
+                            }
+                            xr_curr = xr.Dataset( **kwargs)
+                            combined = xr.concat( [ xr_prev, xr_curr], dim="sample_idx", join="exact" )
+                        comp = dict(zlib=True, complevel=5)
+                        encoding = {var: comp for var in combined.data_vars}
+                        combined.to_netcdf(self.cache_path, mode='w', encoding=encoding )
+                
+                if bool_update_scaler_features: 
+                    # reshaping feature into ( num, dims) dimension required by partial_fit
+                    dim = dict_data['input'][0].shape[-1]
+                    features_numpy = torch.concat(dict_data['input']).numpy()
+                    self.scaler_features.partial_fit( features_numpy.reshape(-1, dim ) )
+                
+                if bool_update_scaler_target:
+                    dim = 1    
+                    target = torch.concat(dict_data['target'])
+                    target_mask = torch.concat(dict_data['mask'])
+
+                    target = target[~target_mask]
+                    if target.numel()!=0:
+                        self.scaler_target.partial_fit( target.reshape(-1, dim).numpy() )
+
+                sample_idx += torch.concat(dict_data['input']).shape[0]
+                
+                # yield dict_data
+                if type(dict_data['input'])==tuple:
+                    li_dicts = [ {key:dict_data[key][idx] for key in dict_data.keys() }for idx in range(len(dict_data['target'])) ]
+                    yield from li_dicts
+                
+                else:
+                    yield dict_data
+                    # yield {k:v.unsqueeze(-1) for k,v in dict_data.items()}
+
+    def __len__(self):
+
+        if self.cache_exists:
+            if hasattr(self, 'cache_len_per_worker'):
+                l =  self.cache_len_per_worker
+            
+            elif hasattr(self, 'cache_len'):
+                l = int( self.cache_len / max(1,self.workers) ) 
+            
+            elif hasattr(self,'cache_start_idx') and hasattr(self,'cache_end_idx'):
+                l =  ( self.cache_end_idx - self.cache_start_idx )//max(self.workers,1)
+
+        else:
+            if hasattr(self.mf_data, 'data_len_per_worker'):
+                l = (self.mf_data.data_len_per_worker // self.mf_data.lookback ) * self.loc_count
+                
+            elif hasattr(self.mf_data, 'data_len_per_location'):
+                l = self.mf_data.data_len_per_location * self.loc_count
+
+        return l
+        
+    def preprocess_batch(self, feature, feature_mask, target, target_mask, normalize=True):
+        
+        # Converting to tensors
+        feature = torch.as_tensor(feature)
+        feature_mask = torch.as_tensor(feature_mask)
+        target = torch.as_tensor(target)
+        target_mask = torch.as_tensor(target_mask)
+
+        # Preparing feature model fields
+        # unbatch
+        feature = feature.view(-1, self.dconfig.lookback_feature ,*feature.shape[-3:] ) # ( bs*feat_days ,h, w, shape_feat)
+        feature_mask = feature_mask.view(-1, self.dconfig.lookback_feature,*feature.shape[-3:] ) # ( bs*feat_days ,h, w, shape_dim)
+        
+        if normalize:
+            feature = (feature-self.feature_mean )/self.featurses_scale
+        feature.masked_fill_( feature_mask, self.dconfig.mask_fill_value['model_field'])
+
+        # Preparing Eobs and target_rain_data
+        target = target.view(-1, self.dconfig.lookback_target, *target.shape[-2:] ) #( bs, target_periods ,h1, w1, target_dim)
+        target_mask = target_mask.view(-1, self.dconfig.lookback_target, *target.shape[-2:] )#( bs*target_periods ,h1, w1, target_dim)
+
+        if normalize:
+            target = target*self.target_scale
+        target.masked_fill_(target_mask, self.dconfig.mask_fill_value['rain'] )
+
+        li_feature, li_target, li_target_mask, idx_loc_in_region = self.location_extractor( feature, target, target_mask, self.locations)
+        
+        dict_data = { k:v for k,v in zip(['input','target','mask','idx_loc_in_region' ], [li_feature, li_target, li_target_mask, idx_loc_in_region] ) }
+        return dict_data
+
+    def get_idx(self, date:Union[np.datetime64,str] ):
+        """ Returns two indexes
+                The first index is the idx at which to start extracting data from the feature dataset
+                The second index is the idx at which to start extracting data from the target dataset
+            Args:
+                start_date (np.datetime64): Start date for evaluation
+            Returns:
+                tuple (int, int): starting index for the feature, starting index for the target data
+        """        
+
+        if type(date)==str:
+            date = copy.deepcopy(date)
+            date = np.datetime64(date)
+            
+        feature_start_date = self.dconfig.feature_start_date
+        target_start_date = self.dconfig.target_start_date
+
+        feat_days_diff = np.timedelta64(date - feature_start_date,'6h').astype(int)
+        tar_days_diff = np.timedelta64(date - target_start_date, 'D').astype(int)
+
+        feat_idx = feat_days_diff #since the feature comes in four hour chunks
+        tar_idx = tar_days_diff 
+
+        return feat_idx, tar_idx
+
+    def location_extractor(self, feature, target, target_mask, locations):
+        """Extracts the temporal slice of patches corresponding to the locations of interest 
+
+                Args:
+                    ds (tf.Data.dataset): dataset containing temporal slices of the regions surrounding the locations of interest
+                    locations (list): list of locations (strings) to extract
+
+                Returns:
+                    tuple: (tf.data.Dataset, [int, int] ) tuple containing dataset and [h,w] of indexes of the central region
+        """        
+        
+        
+        # list of central h,w indexes from which to extract the region around
+        if locations == ["All"]:
+            li_hw_idxs = self.rain_data.get_locs_for_whole_map( self.dconfig, self.shuffle ) #[ ([upper_h, lower_h]. [left_w, right_w]), ... ]
+        else:
+            li_hw_idxs = [ self.rain_data.find_idx_of_loc_region( _loc, self.dconfig ) for _loc in locations ] #[ (h_idx,w_idx), ... ]
+        
+        # Creating seperate datasets for each location
+        li_feature, li_target, li_target_mask = zip(*[ self.select_region( feature, target, target_mask, hw_idxs[0], hw_idxs[1] ) for hw_idxs in li_hw_idxs ] )
+                
+        # pair of indexes locating the central location within the grid region extracted for any location
+        idx_loc_in_region = [ np.floor_divide( self.dconfig.outer_box_dims, 2)[np.newaxis,...] ]*len( torch.concat(li_feature) ) #This specifies the index of the central location of interest within the (h,w) patch    
+        
+        return li_feature, li_target, li_target_mask, idx_loc_in_region
+    
+    def select_region( self, mf, rain, rain_mask, h_idxs, w_idxs):
+        """ Extract the region relating to a [h_idxs, w_idxs] pair
+
+            Args:
+                mf:model field data
+                rain:target rain data
+                rain_mask:target rain mask
+                h_idxs:int
+                w_idxs:int
+
+            Returns:
+                tf.data.Dataset: 
+        """
+
+        """
+            idx_h,idx_w: refer to the top left right index for the square region of interest this includes the region which is removed after cropping to calculate the loss during train step
+        """
+    
+        mf = mf[ ..., h_idxs[0]:h_idxs[1] , w_idxs[0]:w_idxs[1] ,:] # (shape, h, w, d)
+        rain = rain[ ..., h_idxs[0]:h_idxs[1] , w_idxs[0]:w_idxs[1] ]
+        rain_mask = rain_mask[ ..., h_idxs[0]:h_idxs[1] , w_idxs[0]:w_idxs[1] ]
+            
+        return mf, rain, rain_mask #Note: expand_dim for unbatch/batch compatibility
+
+    def create_cache_scaler(self):
+
+        """
+            This functions returns the cache_path, scaler_features, scaler_target
+            if self.scaler_features, or self.scaler_target do not exists then they are created
+
+        Returns:
+            [type]: [description]
+        """
+        
+        if os.path.exists(self.cache_path):
+            os.remove(self.cache_path)
+        self.cache_exists = False
+
+        for dict_data in iter(self):
+            pass
+        
+        assert self.scaler_features 
+        assert self.scaler_target
+        assert os.path.exists(self.cache_path)
+
+        self.cache_exists = True
+
+
+        return self.scaler_features, self.scaler_target
+
+    def create_cache_params(self):
+        
+        with xr.open_dataset( self.cache_path, cache=False ) as xr_cache:
+            # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
+            if not hasattr(self,'max_cache_len'):
+                self.max_cache_len = xr_cache["sample_idx"].shape[0]
+
+        # Making sure its a multiple of lookback away from start idx
+        if not hasattr(self,'cache_start_idx'):
+            self.cache_start_idx = 0
+        if not hasattr(self,'cache_end_idx'):
+            self.cache_end_idx = 0 + int(((self.max_cache_len - self.cache_start_idx)//self.dconfig.lookback_target)*self.dconfig.lookback_target )
+        if not hasattr(self,'cache_len'):
+            self.cache_len = self.cache_end_idx + 1 - self.cache_start_idx
+
+    @staticmethod
+    def worker_init_fn(worker_id:int):
+        
+        worker_info = torch.utils.data.get_worker_info()
+        worker_count = worker_info.num_workers
+        if isinstance(worker_info.dataset, ShufflerIterDataPipe):
+            ds = worker_info.dataset.datapipe.iterable
+        elif isinstance(worker_info.dataset, Era5EobsDataset ):
+            ds = worker_info.dataset
+
+        if ds.cache_exists:
+            
+            per_worker = ds.cache_len//worker_count
+            ds.cache_start_idx = per_worker * worker_id
+            ds.cache_end_idx = per_worker * ( worker_id + 1)
+            ds.cache_len_per_worker = per_worker
+        
+        else:
+            # Changing the start_idx and end_idx in the underlying generators
+            mf_data_len_per_location = ds.mf_data.start_idx - ds.mf_data.end_idx
+            per_worker_per_location = mf_data_len_per_location//worker_count 
+            ds.mf_data.start_idx = worker_id*per_worker_per_location
+            ds.mf_data.end_idx = (worker_id+1)*per_worker_per_location
+            ds.mf_data.data_len_per_worker = per_worker_per_location * ds.loc_count
+
+            rain_data_len_per_location = ds.rain_data.start_idx - ds.rain_data.end_idx
+            per_worker_per_location = rain_data_len_per_location//worker_count 
+            ds.rain_data.start_idx = worker_id*per_worker_per_location
+            ds.rain_data.end_idx = (worker_id+1)*per_worker_per_location
+            ds.rain_data.data_len_per_worker = per_worker_per_location * ds.loc_count
+
+    @staticmethod
+    def parse_data_args(parent_parser):
+        parser = argparse.ArgumentParser(
+            parents=[parent_parser], add_help=True, allow_abbrev=False)
+
+        parser.add_argument("--original_uk_dim", default=(100,140) )
+        parser.add_argument("--input_shape", default=(6,) )
+        parser.add_argument("--output_shape", default=(1,1) )
+                
+        parser.add_argument("--locations", nargs='+', required=True)
+        parser.add_argument("--locations_test", nargs='+', required=False, default=["London","Cardiff","Glasgow","Manchester","Birmingham","Liverpool","Ediburgh","Dublin","Preston","Truro","Bangor","Plymouth","Norwich","StDavids","Salford","Hull" ] )
+
+        parser.add_argument("--data_dir", default="./Data/uk_rain", type=str)
+        parser.add_argument("--rain_fn", default="eobs_true_rainfall_197901-201907_uk.nc", type=str)
+        parser.add_argument("--mf_fn", default="model_fields_linearly_interpolated_1979-2019.nc", type=str)
+
+        parser.add_argument("--vertical_shift", type=int, default=1)
+        parser.add_argument("--horizontal_shift", type=int, default=1)
+
+        parser.add_argument("--outer_box_dims",nargs='+', default=[1,1])
+        parser.add_argument("--inner_box_dims",nargs='+', default=[1,1])
+
+        parser.add_argument("--lookback_target", type=int, default=7)
+        # parser.add_argument("--target_range", nargs='+', default=[0,4])
+
+        parser.add_argument("--train_start", type=str, default="1979" )
+        parser.add_argument("--train_end", type=str, default="2009" )
+
+        parser.add_argument("--val_start", type=str, default="2009" )
+        parser.add_argument("--val_end", type=str, default="2014" )
+
+        parser.add_argument("--test_start", type=str, default="2014" )
+        parser.add_argument("--test_end", type=str, default="2019-07" )
+
+        parser.add_argument("--min_rain_value", type=float, default=0.5)
+        parser.add_argument("--gen_size", type=int, default=4, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+
+
+        dconfig = parser.parse_known_args()[0]
+        dconfig.locations = sorted(dconfig.locations)
+        dconfig = Era5EobsDataset.add_fixed_args(dconfig)
+
+        return dconfig
+    
+    @staticmethod
+    def add_fixed_args(dconfig):
+        dconfig.mask_fill_value = {
+                                    "rain":0.0,
+                                    "model_field":0.0 
+        }
+        dconfig.vars_for_feature = ['unknown_local_param_137_128', 'unknown_local_param_133_128', 'air_temperature', 'geopotential', 'x_wind', 'y_wind' ]
+        
+
+        dconfig.window_shift = dconfig.lookback_target
+        
+        #Input is at 6 hour intervals, target is daily
+        dconfig.lookback_feature = dconfig.lookback_target*4
+        
+        dconfig.target_start_date = np.datetime64('1950-01-01') + np.timedelta64(10592,'D')
+        dconfig.feature_start_date = np.datetime64('1970-01-01') + np.timedelta64(78888, 'h')
+
+        # a string containing four dates seperated by underscores
+        # The numbers correspond to trainstart_trainend_valstart_valend
+
+        train_start_date = np.datetime64(dconfig.train_start,'D')
+        train_end_date = (pd.Timestamp(dconfig.train_end) - pd.DateOffset(seconds=1) ).to_numpy()
+
+        val_start_date = np.datetime64(  dconfig.val_start,'D')
+        val_end_date = (pd.Timestamp(dconfig.val_end) - pd.DateOffset(seconds=1) ).to_numpy()
+
+        test_start_date = np.datetime64(  dconfig.test_start,'D')
+        test_end_date = (pd.Timestamp(dconfig.test_end) - pd.DateOffset(seconds=1) ).to_numpy()
+
+        loc_count = len(dconfig.locations)  if \
+                    dconfig.locations != ["All"] else \
+                    len( Generator.get_locs_for_whole_map(None, dconfig, False))
+
+        loc_count_test = loc_count \
+                            if not dconfig.locations_test \
+                            else (
+                                    len(dconfig.locations_test)  if \
+                                        dconfig.locations_test != ["All"] else \
+                                        len(Generator.get_locs_for_whole_map(None, dconfig, False))
+                                    )
+        
+        dconfig.loc_count = loc_count
+        dconfig.loc_count_test = loc_count_test
+
+        dconfig.train_set_size_elements = ( np.timedelta64(train_end_date - train_start_date,'D') // dconfig.window_shift ).astype(int)
+        dconfig.train_set_size_elements *= loc_count
+
+        dconfig.val_set_size_elements = ( np.timedelta64(val_end_date - val_start_date,'D')  // dconfig.window_shift  ).astype(int)               
+        dconfig.val_set_size_elements *= loc_count
+
+        dconfig.test_set_size_elements = ( np.timedelta64(test_end_date - test_start_date,'D')  // dconfig.window_shift  ).astype(int)               
+        dconfig.test_set_size_elements *= loc_count_test
+        
+        return dconfig
+
+    @staticmethod
+    def cond_rain(vals, probs, threshold=0.5):
+        """
+            If prob of event occuring is above 0.5 return predicted conditional event value,
+            If it is below 0.5, then return 0
+        """
+        round_probs = torch.where(probs<=threshold, 0.0, 1.0)
+        vals = vals* round_probs
+        return vals
+    
+    @staticmethod
+    # @lru_cache(100)
+    def central_region_bounds(dconfig):
+        """Returns the indexes defining the boundaries for the central regions for evaluation
+
+        Args:
+            region_grid_params (dict): information on formualation of the patches used in this ds 
+
+        Returns:
+            list: defines the vertices of the patch for extraction
+        """    
+
+        central_hw_point = np.asarray(dconfig.outer_box_dims)//2
+        
+        lower_hw_bound = central_hw_point - np.asarray(dconfig.inner_box_dims) //2
+
+        upper_hw_bound = lower_hw_bound + np.asarray(dconfig.inner_box_dims )
+        
+
+        return [lower_hw_bound[0], upper_hw_bound[0], lower_hw_bound[1], upper_hw_bound[1]]
+
+    @staticmethod
+    def extract_central_region(tensor, bounds):
+        """
+            Args:
+                tensor ([type]): 4d or 5d tensor
+                bounds ([type]): bounds defining the vertices of the patch to be extracted for evaluation
+        """
+        tensor_cropped = tensor[ ..., bounds[0]:bounds[1],bounds[2]:bounds[3]  ]     #(bs, h , w)
+        return tensor_cropped
+    
+    @staticmethod
+    def water_mask( tensor, mask, mask_val=np.nan):
+        """Mask out values in tensor by with mask value=0.0
+        """
+        tensor = torch.where(mask, tensor, mask_val)
+
+        return tensor
+
+# endrefion 
+
+MAP_NAME_DSET = {'toy':ToyDataset, 'australia_rain':AustraliaRainDataset, 'uk_rain':Era5EobsDataset }
+
