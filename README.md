@@ -30,6 +30,13 @@ GLM model
   - Two Evaluation Datasets: 1.Toy Dataset 2.Australian Weather Dataset
 
 
+# Setup
+1. Git clone repository
+2. Install from requirements
+    - install using this command 'cat requirements.txt | xargs -n 1 pip install'
+    - This is required due to issues discussed in the following github issue https://github.com/pypa/pip/issues/8176
+    - tl;dr : neither pip freeze or pip list --format=freeze work if a user has install packages directly from github
+
 
 # Training and Testing: 
 python3 train.py
