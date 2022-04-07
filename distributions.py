@@ -43,7 +43,7 @@ class LogNormalHurdle():
 
     def __init__(self,mu=0.0, disp=1.0, prob=0.5, validate_args=None):
         mu = torch.as_tensor(mu)
-        disp = torch.as_tensor(disp)
+        disp = torch.as_tensor(disp) 
 
         self.set_parameters(mu, disp, prob, validate_args)
 
@@ -79,7 +79,8 @@ class LogNormalHurdle():
             [type]: [description]
         """
         
-        mu = mu + torch.log( torch.as_tensor( 1/scaler.scale_, device=mu.device) )
+        # mu = mu + torch.log( mu.new_tensor( 1/scaler.scale_) )
+        mu = mu + torch.log( mu.new_tensor( scaler.scale_) )
         
         disp = disp
 
@@ -88,7 +89,7 @@ class LogNormalHurdle():
     @classmethod    
     def get_mean(cls, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            mean =  torch.where( p>=0.5, torch.exp( mu + disp.pow(2)/2), 0.0 )
+            mean =  torch.where( p>=0.5, torch.exp( mu + disp.pow(2)/2), mu.new_tensor(0.0) )
         elif isinstance(mu, np.ndarray):
             mean = np.where( p>=0.5, np.exp( mu + np.power(disp,2)/2), 0.0 )
 
@@ -96,7 +97,7 @@ class LogNormalHurdle():
     @classmethod
     def get_variance(cls, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            var =  torch.where( p>=0.5, ( torch.exp(disp) - 1 ) * torch.exp(2*mu + disp), 0.0 )
+            var =  torch.where( p>=0.5, ( torch.exp(disp) - 1 ) * torch.exp(2*mu + disp), mu.new_tensor(0.0) )
         elif isinstance(mu, np.ndarray):
             var =  np.where( p>=0.5, ( np.exp(disp) - 1 ) * np.exp(2*mu + disp), 0.0 )
 
@@ -105,7 +106,7 @@ class LogNormalHurdle():
     @classmethod
     def get_mode(cls, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            mode =  torch.where( p>=0.5, torch.exp(mu-disp), 0.0 )
+            mode =  torch.where( p>=0.5, torch.exp(mu-disp), mu.new_tensor(0.0))
         elif isinstance(mu, np.ndarray):
             mode =  np.where( p>=0.5, np.exp(mu-disp), 0.0 )
         return mode
@@ -113,7 +114,7 @@ class LogNormalHurdle():
     @classmethod
     def get_skewness(self, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            skewness =  torch.where( p>=0.5, (torch.exp(disp)+2)*(torch.exp(disp)-1).pow(0.5), 0.0 )
+            skewness =  torch.where( p>=0.5, (torch.exp(disp)+2)*(torch.exp(disp)-1).pow(0.5), mu.new_tensor(0.0) )
         elif isinstance(mu, np.ndarray):
             skewness =  np.where( p>=0.5, (np.exp(disp)+2)*(np.power( np.exp(disp)-1), 0.5), 0.0 )
 
@@ -184,7 +185,7 @@ class GammaHurdle():
             [type]: [description]
         """
         
-        mu = mu * 1/torch.as_tensor(scaler.scale_, device=mu.device)
+        mu = mu * 1/mu.new_tensor(scaler.scale_)
         disp = disp
 
         return mu, disp, p
@@ -258,7 +259,8 @@ class CompoundPoisson():
         Returns:
             [type]: [description]
         """
-        scale_ = torch.as_tensor(scaler.scale_, device=mu.device)
+        # scale_ = torch.as_tensor(scaler.scale_, device=mu.device)
+        scale_ = mu.new_tensor(scaler.scale_)
         mu = mu * 1/scale_
         disp = disp *( (1/scale_)**(2-p))
         return mu, disp, p
@@ -275,7 +277,7 @@ class CompoundPoisson():
     @classmethod
     def get_mean(cls, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            mu = torch.where(mu>1.0, mu, 0.0)
+            mu = torch.where(mu>1.0, mu, mu.new_tensor(0.0))
         elif isinstance(mu, np.ndarray):
             mu = np.where(mu>1.0, mu, 0.0)
         return mu
@@ -283,7 +285,7 @@ class CompoundPoisson():
     @classmethod
     def get_variance(self, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            var = torch.where( mu>1.0, disp * mu.pow(p), 0.0)
+            var = torch.where( mu>1.0, disp * mu.pow(p), mu.new_tensor(0.0))
 
         elif isinstance(mu, np.ndarray):
             var = np.where( mu>1.0, disp * np.power(mu, p), 0.0)

@@ -298,7 +298,13 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
 
         res = super().on_save_checkpoint(checkpoint)
-        next( filter( lambda cb: isinstance(cb, ModelCheckpoint), self.trainer.callbacks) ).to_yaml()
+        try:
+            mc = next( filter( lambda cb: isinstance(cb, ModelCheckpoint), self.trainer.callbacks) )
+            if not os.path.exists(mc.dirpath): os.makedirs(mc.dirpath, exist_ok=True)
+            mc.to_yaml()
+        except FileNotFoundError as e:
+            pass
+
         return res
 
     def test_step(self, batch, batch_idx):
@@ -320,116 +326,117 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         return output
 
     def test_epoch_end(self, outputs: EPOCH_OUTPUT) -> None:
-        
-        # Saving the predictions and targets from the test sets
-        pred_mu = torch.cat( [output['pred_mu'] for output in outputs], dim=0 )
-        pred_disp = torch.cat( [output['pred_disp'] for output in outputs], dim=0 )
+        try:
+            # Saving the predictions and targets from the test sets
+            pred_mu = torch.cat( [output['pred_mu'] for output in outputs], dim=0 )
+            pred_disp = torch.cat( [output['pred_disp'] for output in outputs], dim=0 )
 
-        if self.neural_net.p_variable_model:
-            pred_p = torch.cat( [output['pred_p'] for output in outputs], dim=0 )
-        else:
-            pred_p = None
-        
-        #target data
-        target_did_rain = torch.cat( [output['target_did_rain'] for output in outputs], dim=0 )
-        target_rain_value = torch.cat( [output['target_rain_value'] for output in outputs], dim=0 )
-        
-        #unscaling predictive distribution
-        pred_mu_unscaled, pred_disp_unscaled, pred_p_unscaled = self.target_distribution.unscale_distribution( pred_mu, pred_disp, pred_p, self.scaler_target )
-
-        pred_mu_unscaled = pred_mu_unscaled.cpu().numpy()
-        pred_disp_unscaled = pred_disp_unscaled.cpu().numpy()
-        pred_p_unscaled=pred_p_unscaled.cpu().numpy()
-
-        target_rain_unscaled = self.unscale_rain(target_rain_value, self.scaler_target)
-        target_rain_unscaled = target_rain_unscaled.cpu().numpy()
-
-        # Split predictions by location
-        test_dl = self.trainer.test_dataloaders[0]
-
-        if self.task == "australia_rain":
-            locations = [ ds.location for ds in test_dl.dataset.datasets]
-            cumulative_sizes = [0] + test_dl.dataset.cumulative_sizes
+            if self.neural_net.p_variable_model:
+                pred_p = torch.cat( [output['pred_p'] for output in outputs], dim=0 )
+            else:
+                pred_p = None
             
-            dict_location_data = {}
-            for idx, loc in enumerate(locations):
-                if cumulative_sizes==0:
-                    continue
-                s_idx = cumulative_sizes[idx]
-                e_idx = cumulative_sizes[idx+1]
-
-                lookback = test_dl.dataset.datasets[idx].lookback
-                dates = test_dl.dataset.datasets[idx].dates #dates in dataset that are valid
-                indexes_filtrd = test_dl.dataset.datasets[idx].indexes_filtrd #indexes_filtrd
-                
-                date_windows = [ dates[idx-lookback:idx] for idx in indexes_filtrd[lookback: ] ]
-
-                data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
-                        'pred_disp':pred_disp_unscaled[s_idx:e_idx],
-                        'target_did_rain':target_did_rain[s_idx:e_idx],
-                        'target_rain_value':target_rain_unscaled[s_idx:e_idx],
-                        'date':date_windows }
-                
+            #target data
+            target_did_rain = torch.cat( [output['target_did_rain'] for output in outputs], dim=0 )
+            target_rain_value = torch.cat( [output['target_rain_value'] for output in outputs], dim=0 )
             
-                if self.neural_net.p_variable_model:
-                    data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
+            #unscaling predictive distribution
+            pred_mu_unscaled, pred_disp_unscaled, pred_p_unscaled = self.target_distribution.unscale_distribution( pred_mu, pred_disp, pred_p, self.scaler_target )
 
-                dict_location_data[loc] = data
+            pred_mu_unscaled = pred_mu_unscaled.cpu().numpy()
+            pred_disp_unscaled = pred_disp_unscaled.cpu().numpy()
+            pred_p_unscaled=pred_p_unscaled.cpu().numpy()
 
-            dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
-            file_path = os.path.join( dir_path, "test_output.pkl" ) 
-            with open( file_path, "wb") as f:
-                pickle.dump( dict_location_data, f )
+            target_rain_unscaled = self.unscale_rain(target_rain_value, self.scaler_target)
+            target_rain_unscaled = target_rain_unscaled.cpu().numpy()
+
+            # Split predictions by location
+            test_dl = self.trainer.test_dataloaders[0]
+
+            if self.task == "australia_rain":
+                locations = [ ds.location for ds in test_dl.dataset.datasets]
+                cumulative_sizes = [0] + test_dl.dataset.cumulative_sizes
+                
+                dict_location_data = {}
+                for idx, loc in enumerate(locations):
+                    if cumulative_sizes==0:
+                        continue
+                    s_idx = cumulative_sizes[idx]
+                    e_idx = cumulative_sizes[idx+1]
+
+                    lookback = test_dl.dataset.datasets[idx].lookback
+                    dates = test_dl.dataset.datasets[idx].dates #dates in dataset that are valid
+                    indexes_filtrd = test_dl.dataset.datasets[idx].indexes_filtrd #indexes_filtrd
+                    
+                    date_windows = [ dates[idx-lookback:idx] for idx in indexes_filtrd[lookback: ] ]
+
+                    data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
+                            'pred_disp':pred_disp_unscaled[s_idx:e_idx],
+                            'target_did_rain':target_did_rain[s_idx:e_idx],
+                            'target_rain_value':target_rain_unscaled[s_idx:e_idx],
+                            'date':date_windows }
+                    
+                
+                    if self.neural_net.p_variable_model:
+                        data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
+
+                    dict_location_data[loc] = data
+
+                dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
+                file_path = os.path.join( dir_path, "test_output.pkl" ) 
+                with open( file_path, "wb") as f:
+                    pickle.dump( dict_location_data, f )
+            
+            elif self.task == "uk_rain":
+                idx_loc_in_region = torch.cat( [output['idx_loc_in_region'] for output in outputs], dim=0 )
+                dconfig = test_dl.dataset.dconfig
+                locations = dconfig.locations
+                loc_count = dconfig.loc_count
+                count_per_location = dconfig.test_set_size_elements / loc_count
+                cumulative_sizes = [ int(idx*count_per_location) for idx in range( len(locations)+1) ]
+
+                dict_location_data = {}
+                for idx, loc in enumerate(locations):
+                    s_idx = cumulative_sizes[idx]
+                    e_idx = cumulative_sizes[idx+1]
+
+                    lookback = dconfig.lookback_target
+                    dates = pd.date_range( end=dconfig.test_end, start=dconfig.test_start, freq='D', normalize=True)
+                    
+                    date_windows = [ dates[idx:idx+lookback] for idx in range( 0, len(pred_mu_unscaled)-lookback, lookback )  ]
+
+                    data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
+                            'pred_disp':pred_disp_unscaled[s_idx:e_idx],
+                            'target_did_rain':target_did_rain[s_idx:e_idx],
+                            'target_rain_value':target_rain_unscaled[s_idx:e_idx],
+                            'idx_loc_in_region':idx_loc_in_region[s_idx:e_idx],
+                            'date':date_windows }
+                    
+                    if self.neural_net.p_variable_model:
+                        data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
+
+                    dict_location_data[loc] = data
+
+                dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
+                file_path = os.path.join( dir_path, "test_output.pkl" ) 
+                with open( file_path, "wb") as f:
+                    pickle.dump( dict_location_data, f )
         
-        elif self.task == "uk_rain":
-            idx_loc_in_region = torch.cat( [output['idx_loc_in_region'] for output in outputs], dim=0 )
-            dconfig = test_dl.dataset.dconfig
-            locations = dconfig.locations
-            loc_count = dconfig.loc_count
-            count_per_location = dconfig.test_set_size_elements / loc_count
-            cumulative_sizes = [ int(idx*count_per_location) for idx in range( len(locations)+1) ]
+        except Exception:
+            pass
 
-            dict_location_data = {}
-            for idx, loc in enumerate(locations):
-                s_idx = cumulative_sizes[idx]
-                e_idx = cumulative_sizes[idx+1]
-
-                lookback = dconfig.lookback_target
-                dates = pd.date_range( end=dconfig.test_end, start=dconfig.test_start, freq='D', normalize=True)
-                
-                date_windows = [ dates[idx:idx+lookback] for idx in range( 0, len(pred_mu_unscaled)-lookback, lookback )  ]
-
-                data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
-                        'pred_disp':pred_disp_unscaled[s_idx:e_idx],
-                        'target_did_rain':target_did_rain[s_idx:e_idx],
-                        'target_rain_value':target_rain_unscaled[s_idx:e_idx],
-                        'idx_loc_in_region':idx_loc_in_region[s_idx:e_idx],
-                        'date':date_windows }
-                
-                if self.neural_net.p_variable_model:
-                    data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
-
-                dict_location_data[loc] = data
-
-            dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
-            file_path = os.path.join( dir_path, "test_output.pkl" ) 
-            with open( file_path, "wb") as f:
-                pickle.dump( dict_location_data, f )
- 
         return super().test_epoch_end(outputs)
         
     def configure_optimizers(self):
         optimizer = Adafactor(self.parameters(), scale_parameter=True, relative_step=True, 
                                 warmup_init=True, lr=None, 
-                                weight_decay=0.1,
-                                clip_threshold=0.5)
+                                weight_decay=0.01,
+                                clip_threshold=0.1)
 
         lr_scheduler = AdafactorSchedule(optimizer)
         return { 'optimizer':optimizer, 
                     'lr_scheduler':lr_scheduler,
-                    'interval':'step',
                     'frequency':1,
-
                      }
 
     def save_scalers(self, dir_path:str, **kwargs ) -> None:

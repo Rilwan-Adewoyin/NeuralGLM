@@ -270,7 +270,7 @@ class TemporalDownScaleAttention(nn.Module):
         self.tfactor = tfactor
         self.pos_emb = nn.Embedding( self.tfactor,
                             embedding_dim )
-        self.register_buffer('indices', torch.range(0,self.tfactor-1, dtype=torch.long))
+        self.register_buffer('indices', torch.arange(0,self.tfactor, dtype=torch.long))
 
         self.mha = nn.MultiheadAttention(
                         embedding_dim,

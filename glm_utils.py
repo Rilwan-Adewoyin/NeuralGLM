@@ -27,7 +27,7 @@ import regex as re
 import distributions
 
 from typing import List, Dict
-from pytorch_lightning.utilities.types import _METRIC
+# from pytorch_lightning.utilities.types import _METRIC
 from torch.nn import functional as F
 
 from torch.utils.data._utils.collate import np_str_obj_array_pattern, default_collate_err_msg_format, default_collate
@@ -213,7 +213,7 @@ class GLMMixin:
 def _format_checkpoint_name(
     cls,
     filename: Optional[str],
-    metrics: Dict[str, _METRIC],
+    metrics, #Dict[str, _METRIC],
     prefix: str = "",
     auto_insert_metric_name: bool = True,
     ) -> str:

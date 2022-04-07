@@ -35,17 +35,12 @@ class LogNormalHurdleNLLLoss(_Loss):
     
     def lognormal_nll(self, obs, mu, disp ):
 
-        # disp = disp.clone()
-        # obs = obs.clone()
-        # with torch.no_grad():
-        #     # disp.clamp_(min=self.eps)
-        #     # obs.clamp_(min=self.eps)
-        #     obs.clamp_(min=mu.exp().min())
-
+  
         logobs = torch.log(obs)
         logobs = logobs.clone()
         with torch.no_grad():
-            logobs.clamp_(min=mu.min())
+            if logobs.numel()>0:
+                logobs.clamp_(min=mu.min()) 
             
         ll  = -0.5 * (torch.log(disp) + (logobs - mu )**2 / disp ) 
                         
@@ -120,7 +115,12 @@ class LogNormalHurdleNLLLoss(_Loss):
         return loss, {'loss_norain':loss_norain.detach() , 'loss_rain':loss_rain.detach()}            
 
     def prediction_metrics(self, rain, did_rain, mean, logits, **kwargs):
-
+        if mean.numel() == 0:
+            return {
+                'pred_acc':mean.new_tensor(0.0),
+                'pred_rec':mean.new_tensor(0.0),
+                'pred_mse':mean.new_tensor(0.0)
+            }
         #Classification losses
         pred_rain_bool = torch.where( logits>=0.0, 1.0, 0.0)
         pred_acc = torch.mean( pred_rain_bool*did_rain + (pred_rain_bool-1)*(did_rain-1) )
@@ -243,6 +243,12 @@ class GammaHurdleNLLLoss(_Loss):
         return loss, {'loss_norain':loss_norain.detach() , 'loss_rain':loss_rain.detach()}            
 
     def prediction_metrics(self, rain, did_rain, mean, logits, **kwargs):
+        if mean.numel() == 0:
+            return {
+                'pred_acc':mean.new_tensor(0.0),
+                'pred_rec':mean.new_tensor(0.0),
+                'pred_mse':mean.new_tensor(0.0)
+            }
 
         pred_rain_bool = torch.where( logits>=0.0, 1.0, 0.0)
         pred_acc = torch.mean(  torch.where( pred_rain_bool==did_rain, 1.0, 0.0) )
@@ -327,10 +333,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         #L>0
         # using approximation from https://www.hindawi.com/journals/jps/2018/1012647/
         
-        # mu = mu.clone()
-        # with torch.no_grad():
-        #     mu.clamp_(min=self.eps)
-
+        #
         lambda_ = l = mu.pow(2-p) / ( disp * (2-p) )
         alpha = a = (2-p) / (p-1)  #from the gamm distribution
         beta = b = disp*(p-1)*mu.pow(p-1)
@@ -482,9 +485,9 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         # rain = rain.clone()
         p = p.clone()
         with torch.no_grad():
-            disp.clamp_(min=self.eps)
-            # rain.clamp_(min=self.eps)  
-            p.clamp_(min=1+self.eps, max=2-self.eps)
+            if disp.numel()>0:
+                disp.clamp_(min=self.eps)
+                p.clamp_(min=1+self.eps, max=2-self.eps)
 
         # Gathering indices to seperate days of no rain from days of rain
         count = did_rain.numel()
@@ -524,10 +527,17 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         return loss, {'loss_norain':loss_norain.detach() , 'loss_rain':loss_rain.detach()}
 
     def prediction_metrics(self, rain, did_rain, mean, min_rain_value, **kwargs):
-        
-        pred_rain_bool = torch.where( mean>min_rain_value, 1.0, 0.0)
-        pred_acc = torch.mean(  torch.where( pred_rain_bool==did_rain, 1.0, 0.0) )
-        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum()  if did_rain.sum()>0 else 1
+
+        if mean.numel() == 0:
+            return {
+                'pred_acc':mean.new_tensor(0.0),
+                'pred_rec':mean.new_tensor(0.0),
+                'pred_mse':mean.new_tensor(0.0)
+            }
+            
+        pred_rain_bool = torch.where( mean>min_rain_value, mean.new_tensor(1.0), mean.new_tensor(0.0))
+        pred_acc = torch.mean(  torch.where( pred_rain_bool==did_rain, mean.new_tensor(1.0), mean.new_tensor(0.0)) )
+        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum()  if did_rain.sum()>0 else mean.new_tensor(1)
        
         
         indices_rainydays = torch.where(did_rain.view( (1,-1))>0)

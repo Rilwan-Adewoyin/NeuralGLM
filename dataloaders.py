@@ -889,7 +889,7 @@ class Generator_rain(Generator):
                 slice_w = slice( None, None )
 
                 marray = xr_gn.isel(time=slice_t ,latitude=slice_h, longitude=slice_w)['rr'].to_masked_array(copy=True)
-                array,mask = np.ma.getdata(marray), np.ma.getmask(marray)
+                array, mask = np.ma.getdata(marray), np.ma.getmask(marray)
 
                 mask = (array==9.969209968386869e+36)
                 
@@ -978,8 +978,7 @@ class Era5EobsDataset(IterableDataset):
         # region Checking for pre-existing scalers - If not exists we create in next section
         try:
             #DEBUGGIN rainer_dir = kwargs.get('trainer_dir',None) 
-            trainer_dir="Checkpoints/uk_rain_DGLM_HLSTM_tdscale_gamma_hurdle/lightning_logs/version_0"
-            # trainer_dir = kwargs.get('trainer_dir')
+            trainer_dir = kwargs.get('trainer_dir')
             self.scaler_features = scaler_features if scaler_features != None else pickle.load( open( os.path.join(trainer_dir,"scaler_features.pkl"),"rb") ) 
             self.scaler_target = scaler_target if scaler_target != None else pickle.load( open( os.path.join(trainer_dir,"scaler_target.pkl"),"rb") ) 
         except (FileExistsError, FileNotFoundError, Exception) as e:
@@ -993,7 +992,7 @@ class Era5EobsDataset(IterableDataset):
             premade_dsets = pd.read_csv( premade_dset_path)
         else:
             premade_dsets = pd.DataFrame( columns=['cache_path','scaler_path','start_date','end_date','locations','lookback',
-                                                    'target_distribution_name','target_range'] )
+                                                    'target_range'] )
 
         # Query for if cache for dataset and normalizer
         query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' and \
@@ -1003,15 +1002,23 @@ class Era5EobsDataset(IterableDataset):
         
         #If it exists we just load it
         if len(query_res)!=0:
-            self.cache_exists = True
+            
             self.cache_path = query_res['cache_path'].iloc[0]
+            self.cache_exists = os.path.exists(self.cache_path)
         
             # Otherwise set up parameters to use the normal dataset
         else:
+            
+            os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
+            self.cache_path = os.path.join( self.dconfig.data_dir, "cache",
+                f"start-{start_date}-end-{end_date}_lookbacktarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-locs-{'_'.join([loc[:3] for loc in self.locations])}")
+            self.cache_exists = os.path.exists(self.cache_path)
+        # endregion
+
+        #Finally if any of cache or scalers don't exists we create the non existent ones
+        if not self.cache_exists or self.scaler_features == None or self.scaler_target ==  None:
             # Create python generator for rain data
             fp_rain = self.dconfig.data_dir+"/"+self.dconfig.rain_fn
-            
-            
             self.rain_data = Generator_rain(fp=fp_rain,
                                             all_at_once=False,
                                             iter_chunk_size=self.dconfig.lookback_target*self.gen_size,
@@ -1029,31 +1036,24 @@ class Era5EobsDataset(IterableDataset):
                                         start_idx=start_idx_feat,
                                         end_idx = end_idx_feat)
             
-            
-            os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
-            self.cache_path = os.path.join( self.dconfig.data_dir, "cache",
-                f"start-{start_date}-end-{end_date}_lookbacktarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-locs-{'_'.join([loc[:3] for loc in self.locations])}")
-            self.cache_exists = os.path.exists(self.cache_path)
-        # endregion
-
-        #Finally if any of cache or scalers don't exists we create the non existent ones
-        if not self.cache_exists or self.scaler_features == None or self.scaler_target ==  None:
             self.create_cache_scaler()
-            self.create_cache_params()
+        
+        self.create_cache_params()
             
-            premade_dsets.append( { 
+        if not self.cache_exists or len(query_res)==0:
+            premade_dsets = premade_dsets.append( { 
                 'cache_path':self.cache_path,
                 'start_date':start_date,
                 'end_date':end_date,
                 'locations':'_'.join([loc[:3] for loc in self.locations]),
                 'lookback':str(self.dconfig.lookback_target),
-                'target_range':','.join(map(str,target_range))
+                'target_range':','.join(map(str,target_range),
+                )
             }, ignore_index=True)
             
             premade_dsets.to_csv( premade_dset_path, index=False)
         
-        elif self.cache_exists:
-            self.create_cache_params()
+
                     
         # Create buffers for scaler params
         self.features_scale = torch.as_tensor( self.scaler_features.scale_ )
@@ -1160,23 +1160,28 @@ class Era5EobsDataset(IterableDataset):
                     # yield dict_data        
 
                     if type(dict_data['input'])==tuple:
-                        li_dicts = [ {key:dict_data[key][idx].unsqueeze(0) for key in dict_data.keys() }for idx in range(len(dict_data['target'])) ]
-                        yield from li_dicts
+                        li_dicts = [ {key:dict_data[key][idx].unsqueeze(0) for key in dict_data.keys()} for idx in range(len(dict_data['target'])) ]
+                        
                         
                     elif adj_iter_chunk_size==1:
                         dict_data['idx_loc_in_region'] = dict_data['idx_loc_in_region'].squeeze(0)
-                        yield from [ {k:v.unsqueeze(0) for k,v in dict_data.items()} ]
+                        li_dicts = [ {k:v.unsqueeze(0) for k,v in dict_data.items()} ]
+                        
                     
                     else:
                         _ =  {k:v.unbind() for k,v in dict_data.items()} 
                         li_dicts = [ {key:_[key][idx].unsqueeze(0) for key in dict_data.keys() } for idx in range(len(dict_data['target'])) ]
-                        yield from li_dicts
+                    
+                    # Filter li_dicts that do not have masks
+                    li_dicts = [ dict_ for dict_ in li_dicts if dict_['mask'].logical_not().any()]
+                    
+                    yield from li_dicts
                         
         else: 
             print("Note: User is using non cached dataset. The data will not be normalized automatically")
             sample_idx = 0
             # We calculate the maximum number of samples as the start_idx - end_idx // self.lookback for each generator
-            sample_max_len = min( [ (gen.data_len_per_location)//gen.lookback for gen in [self.mf_data, self.rain_data]] )
+            # sample_max_len = min( [ (gen.data_len_per_location)//gen.lookback for gen in [self.mf_data, self.rain_data]] )
 
             if self.scaler_features == None: 
                 self.scaler_features = StandardScaler()
@@ -1220,31 +1225,32 @@ class Era5EobsDataset(IterableDataset):
                             }
                         kwargs['coords'] = coords
                         xr_curr = xr.Dataset( **kwargs )
-                        xr_curr.to_netcdf(self.cache_path )
+                        # xr_curr.to_netcdf(self.cache_path )
 
                     else:
-                        with xr.open_dataset( self.cache_path, cache=False ) as xr_prev:
-                            kwargs['coords'] = {
-                                "sample_idx": np.arange( xr_prev.dims['sample_idx'], xr_prev.dims['sample_idx']+torch.concat(dict_data['input']).shape[0]  ),
+                        # with xr.open_dataset( self.cache_path, cache=False ) as xr_curr:
+                        kwargs['coords'] = {
+                            "sample_idx": np.arange( xr_curr.dims['sample_idx'], xr_curr.dims['sample_idx']+torch.concat(dict_data['input']).shape[0]  ),
 
-                                "lookback_feat": np.arange( self.dconfig.lookback_feature),
-                                "lookback_target": np.arange( self.dconfig.lookback_target),
+                            "lookback_feat": np.arange( self.dconfig.lookback_feature),
+                            "lookback_target": np.arange( self.dconfig.lookback_target),
 
-                                "h_feat": np.arange( dict_data['input'][0].shape[-3]),
-                                "w_feat": np.arange( dict_data['input'][0].shape[-2]),
+                            "h_feat": np.arange( dict_data['input'][0].shape[-3]),
+                            "w_feat": np.arange( dict_data['input'][0].shape[-2]),
 
-                                "h_target": np.arange( dict_data['target'][0].shape[-2]),
-                                "w_target": np.arange( dict_data['target'][0].shape[-1]),
-                                "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] ),
+                            "h_target": np.arange( dict_data['target'][0].shape[-2]),
+                            "w_target": np.arange( dict_data['target'][0].shape[-1]),
+                            "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] ),
 
-                                "d": np.arange( dict_data['input'][0].shape[-1]),
+                            "d": np.arange( dict_data['input'][0].shape[-1]),
 
-                            }
-                            xr_curr = xr.Dataset( **kwargs)
-                            combined = xr.concat( [ xr_prev, xr_curr], dim="sample_idx", join="exact" )
-                        comp = dict(zlib=True, complevel=5)
-                        encoding = {var: comp for var in combined.data_vars}
-                        combined.to_netcdf(self.cache_path, mode='w', encoding=encoding )
+                        }
+                        xr_new = xr.Dataset( **kwargs)
+                        xr_curr = xr.concat( [ xr_curr, xr_new], dim="sample_idx", join="exact" )
+                        # comp = dict(zlib=True, complevel=5)
+                        # encoding = {var: comp for var in xr_curr.data_vars}
+                        # xr_curr.to_netcdf(self.cache_path, mode='w', encoding=encoding )
+                        # xr_curr.to_netcdf(self.cache_path, mode='w', )
                 
                 if bool_update_scaler_features: 
                     # reshaping feature into ( num, dims) dimension required by partial_fit
@@ -1272,26 +1278,33 @@ class Era5EobsDataset(IterableDataset):
                     yield dict_data
                     # yield {k:v.unsqueeze(-1) for k,v in dict_data.items()}
 
-    def __len__(self):
-
-        if self.cache_exists:
-            if hasattr(self, 'cache_len_per_worker'):
-                l =  self.cache_len_per_worker
-            
-            elif hasattr(self, 'cache_len'):
-                l = int( self.cache_len / max(1,self.workers) ) 
-            
-            elif hasattr(self,'cache_start_idx') and hasattr(self,'cache_end_idx'):
-                l =  ( self.cache_end_idx - self.cache_start_idx )//max(self.workers,1)
-
-        else:
-            if hasattr(self.mf_data, 'data_len_per_worker'):
-                l = (self.mf_data.data_len_per_worker // self.mf_data.lookback ) * self.loc_count
+            if not self.cache_exists:
+                comp = dict(zlib=True, complevel=5)
+                encoding = {var: comp for var in xr_curr.data_vars}
+                xr_curr.to_netcdf(self.cache_path, mode='w', encoding=encoding )
                 
-            elif hasattr(self.mf_data, 'data_len_per_location'):
-                l = self.mf_data.data_len_per_location * self.loc_count
 
-        return l
+
+    # def __len__(self):
+
+    #     if self.cache_exists:
+    #         if hasattr(self, 'cache_len_per_worker'):
+    #             l =  self.cache_len_per_worker
+            
+    #         elif hasattr(self, 'cache_len'):
+    #             l = int( self.cache_len / max(1,self.workers) ) 
+            
+    #         elif hasattr(self,'cache_start_idx') and hasattr(self,'cache_end_idx'):
+    #             l =  ( self.cache_end_idx - self.cache_start_idx )//max(self.workers,1)
+
+    #     else:
+    #         if hasattr(self.mf_data, 'data_len_per_worker'):
+    #             l = (self.mf_data.data_len_per_worker // self.mf_data.lookback ) * self.loc_count
+                
+    #         elif hasattr(self.mf_data, 'data_len_per_location'):
+    #             l = self.mf_data.data_len_per_location * self.loc_count
+
+    #     return l
         
     def preprocess_batch(self, feature, feature_mask, target, target_mask, normalize=True):
         
@@ -1408,19 +1421,17 @@ class Era5EobsDataset(IterableDataset):
             [type]: [description]
         """
         
-        if os.path.exists(self.cache_path):
-            os.remove(self.cache_path)
-        self.cache_exists = False
+        # if os.path.exists(self.cache_path):
+        #     os.remove(self.cache_path)
+        # self.cache_exists = False
 
         for dict_data in iter(self):
             pass
+        self.cache_exists = True
         
         assert self.scaler_features 
         assert self.scaler_target
-        assert os.path.exists(self.cache_path)
-
-        self.cache_exists = True
-
+        assert os.path.exists(self.cache_path) 
 
         return self.scaler_features, self.scaler_target
 
@@ -1450,7 +1461,6 @@ class Era5EobsDataset(IterableDataset):
             ds = worker_info.dataset
 
         if ds.cache_exists:
-            
             per_worker = ds.cache_len//worker_count
             ds.cache_start_idx = per_worker * worker_id
             ds.cache_end_idx = per_worker * ( worker_id + 1)
@@ -1480,7 +1490,7 @@ class Era5EobsDataset(IterableDataset):
         parser.add_argument("--output_shape", default=(1,1) )
                 
         parser.add_argument("--locations", nargs='+', required=True)
-        parser.add_argument("--locations_test", nargs='+', required=False, default=["London","Cardiff","Glasgow","Manchester","Birmingham","Liverpool","Ediburgh","Dublin","Preston","Truro","Bangor","Plymouth","Norwich","StDavids","Salford","Hull" ] )
+        parser.add_argument("--locations_test", nargs='+', required=False, default=["London","Cardiff","Glasgow","Manchester","Birmingham","Liverpool","Edinburgh","Dublin","Preston","Truro","Bangor","Plymouth","Norwich","StDavids","Salford","Hull" ] )
 
         parser.add_argument("--data_dir", default="./Data/uk_rain", type=str)
         parser.add_argument("--rain_fn", default="eobs_true_rainfall_197901-201907_uk.nc", type=str)

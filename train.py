@@ -39,7 +39,7 @@ if __name__ == '__main__':
     train_parser.add_argument("--nn_name", default="HLSTM", choices=["MLP","HLSTM","HLSTM_tdscale"])
     train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
     train_parser.add_argument("--max_epochs", default=100, type=int)
-    train_parser.add_argument("--batch_size", default=12, type=int)
+    train_parser.add_argument("--batch_size", default=32, type=int)
     train_parser.add_argument("--debugging",action='store_true' )
     train_parser.add_argument("--workers",default=6, type=int )
     
@@ -60,7 +60,7 @@ if __name__ == '__main__':
         # Define the trainer
     trainer = pl.Trainer(   gpus=train_args.gpus,
                             default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
-                            callbacks =[EarlyStopping(monitor="val_loss/loss", patience=5 if data_args.locations!=["All"] else 10*3 ),
+                            callbacks =[EarlyStopping(monitor="val_loss/loss", patience=3 if data_args.locations!=["All"] else 3 ),
                                             ModelCheckpoint(
                                                 monitor="val_loss/loss",
                                                 filename='{epoch}-{step}-{val_loss/loss:.3f}-{val_metric/mse_rain:.3f}',
@@ -72,7 +72,7 @@ if __name__ == '__main__':
                             precision=16,
                             max_epochs=train_args.max_epochs,
                             num_sanity_val_steps=0,
-                            val_check_interval=1.0 if data_args.locations != ["All"] else 0.1
+                            val_check_interval=1.0 if data_args.locations != ["All"] else 1.0
                             )
 
     # Generate Dataset 
@@ -118,7 +118,7 @@ if __name__ == '__main__':
         ds_train_iter = IterableWrapperIterDataPipe(ds_train)
         ds_train = ShufflerIterDataPipe(ds_train_iter, 
                             #HERE adjust data length to factor in other locations ont just 1
-                            buffer_size=ds_train.loc_count*(4*6), #Each datum represents 7 days long
+                            buffer_size=ds_train.loc_count*(4*12) if not train_args.debugging else 20, #Each datum represents 7 days long
                             unbatch_level=0)
 
     else:
