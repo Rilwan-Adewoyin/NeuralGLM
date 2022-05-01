@@ -1,4 +1,5 @@
 from typing import Union
+from numpy import float64
 from pytorch_lightning.utilities.types import EPOCH_OUTPUT
 from torch.optim import lr_scheduler
 from torch import nn
@@ -96,8 +97,10 @@ class HLSTM(nn.Module):
 
         parser.add_argument("--num_layers", default=4, type=int)
         parser.add_argument("--hidden_dim", default=64, type=int)
+        parser.add_argument("--dropout", default=0.1, type=float)
         parser.add_argument("--dropoutw", default=0.35, type=float)
-
+        parser.add_argument("--dropouto", default=0.25, type=float)
+        parser.add_argument("--dropouti", default=0.25, type=float)
             
         model_args = parser.parse_known_args()[0]
         return model_args
@@ -112,7 +115,11 @@ class HLSTM_tdscale(nn.Module):
                     output_shape=(2,),
                     hidden_dim:int=64,
                     num_layers:int=2, 
+                    dropout:float=0.1,
                     dropoutw:float=0.35,
+                    dropouto:float=0.25,
+                    dropouti:float=0.25,
+
                     p_variable_model:bool=False,
                     zero_inflated_model:bool=False,
                     
@@ -142,15 +149,14 @@ class HLSTM_tdscale(nn.Module):
                                 *(self.input_shape if len(self.input_shape)==1 else self.input_shape[-1:]), 
                                 hidden_dim, bias=False ) )
 
-
         self.encoder = nn.Sequential(
                         *[SkipConnectionLSTM(LSTM( input_size=hidden_dim, hidden_size=hidden_dim, num_layers=num_layers//2,
-                            dropouti=0.25, dropoutw=dropoutw, dropouto=0.25, batch_first=True, proj_size=hidden_dim//2,
+                            dropouti=dropouti, dropoutw=dropoutw, dropouto=dropouto, batch_first=True, proj_size=hidden_dim//2,
                             bidirectional=True)) for n in range(num_layers//2)],
             ExtractLSTMOutputFeatures(elem="all")
         )
         
-        self.outp_mu_tdscale = TemporalDownScaleAttention( lookback, tfactor, hidden_dim, 4, 0.15, False)
+        self.outp_mu_tdscale = TemporalDownScaleAttention( lookback, tfactor, hidden_dim, 4, dropout, False)
         self.outp_mu = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), 
                                         nn.GELU(),
                                         nn.Linear(hidden_dim, 
@@ -158,17 +164,15 @@ class HLSTM_tdscale(nn.Module):
                                                      bias=True)                                        
                                          )
 
-        self.outp_dispersion_tdscale = TemporalDownScaleAttention( lookback,tfactor, hidden_dim, 4, 0.15, False)
+        self.outp_dispersion_tdscale = TemporalDownScaleAttention( lookback,tfactor, hidden_dim, 4, dropout, False)
         self.outp_dispersion = nn.Sequential( nn.Linear(hidden_dim, hidden_dim, bias=False), 
                                             nn.GELU(),
                                             nn.Linear(hidden_dim,
                                                      *(self.output_shape if len(self.output_shape)==1 else self.output_shape[-1:]),
                                                       bias=True) )
 
-        
-
         if self.p_variable_model:
-            self.p_tdscale = TemporalDownScaleAttention( lookback, tfactor, hidden_dim, 4, 0.15, False)
+            self.p_tdscale = TemporalDownScaleAttention( lookback, tfactor, hidden_dim, 4, dropout, False)
 
             self.outp_logitsrain = nn.Sequential(  nn.Linear(hidden_dim, hidden_dim, bias=False),
                                                     nn.GELU(),

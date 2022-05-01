@@ -25,39 +25,8 @@ from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.data.datapipes.iter.utils import IterableWrapperIterDataPipe
 
 
-if __name__ == '__main__':
-
-    parent_parser = ArgumentParser(add_help=False, allow_abbrev=False)
-
-    # Train args
-    train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
-            
-    train_parser.add_argument("--gpus", default=1)
-    train_parser.add_argument("--sample_size", default=1000)
-    train_parser.add_argument("--dataset", default="australia_rain", choices=["toy","australia_rain","uk_rain"])
-
-    train_parser.add_argument("--nn_name", default="HLSTM", choices=["MLP","HLSTM","HLSTM_tdscale"])
-    train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
-    train_parser.add_argument("--max_epochs", default=100, type=int)
-    train_parser.add_argument("--batch_size", default=32, type=int)
-    train_parser.add_argument("--debugging",action='store_true' )
-    train_parser.add_argument("--workers",default=6, type=int )
-    
-    train_parser.add_argument("--prefetch",type=int, default=8, help="Number of batches to prefetch" )
-
-    train_args = train_parser.parse_known_args()[0]
-    
-    # add model specific args
-    model_args = MAP_NAME_NEURALMODEL[train_args.nn_name].parse_model_args(parent_parser)
-    
-    # add data specific args
-    data_args = MAP_NAME_DSET[train_args.dataset].parse_data_args(parent_parser)
-
-    # add glm specific args
-    glm_args = MAP_NAME_GLM[train_args.glm_name].parse_glm_args(parent_parser)
-
-    
-        # Define the trainer
+def train( train_args, data_args, glm_args, model_args ):
+        # Define the trainer    
     trainer = pl.Trainer(   gpus=train_args.gpus,
                             default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
                             callbacks =[EarlyStopping(monitor="val_loss/loss", patience=3 if data_args.locations!=["All"] else 3 ),
@@ -68,11 +37,14 @@ if __name__ == '__main__':
                                                 auto_insert_metric_name=True,
                                                 save_top_k=1)
                                              ] ,
+                            limit_train_batches = 2,
+                            limit_val_batches = 2,
+                            limit_test_batches = 2,
                             enable_checkpointing=True,
                             precision=16,
                             max_epochs=train_args.max_epochs,
                             num_sanity_val_steps=0,
-                            val_check_interval=1.0 if data_args.locations != ["All"] else 1.0
+                            # val_check_interval=1.0 if data_args.locations != ["All"] else 1.0
                             )
 
     # Generate Dataset 
@@ -108,7 +80,7 @@ if __name__ == '__main__':
                                                                         trainer_dir=trainer.logger.log_dir)
         cf = glm_utils.default_collate_concat
         # cf = default_collate
-        shuffle = False
+        shuffle = True 
         worker_init_fn=Era5EobsDataset.worker_init_fn
                
         # Needs to be true for suffling
@@ -182,234 +154,55 @@ if __name__ == '__main__':
                     train_dataloaders=dl_train,
                     val_dataloaders=dl_val )
     
+
     # Test the Trainer
     trainer.test(dataloaders=dl_test, ckpt_path='best')
 
+def train_tune( train_args, data_args, glm_args, model_args ):
+    pass
 
-# Training scripts
+if __name__ == '__main__':
 
-## australia_rain
-### Gamma model
-### python3 train.py --gpus 1 --dataset australia_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,8
+    parent_parser = ArgumentParser(add_help=False, allow_abbrev=False)
 
-### LogNormal
-### python3 train.py --gpus 1 --dataset australia_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
+    # Train args
+    train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
+            
+    train_parser.add_argument("--gpus", default=1)
+    train_parser.add_argument("--sample_size", default=1000)
+    train_parser.add_argument("--dataset", default="australia_rain", choices=["toy","australia_rain","uk_rain"])
 
-### Compound Poisson v2
-### python3 train.py --gpus 1 --dataset australia_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
+    train_parser.add_argument("--nn_name", default="HLSTM", choices=["MLP","HLSTM","HLSTM_tdscale"])
+    train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
+    train_parser.add_argument("--max_epochs", default=100, type=int)
+    train_parser.add_argument("--batch_size", default=32, type=int)
+    train_parser.add_argument("--debugging",action='store_true' )
+    train_parser.add_argument("--workers",default=6, type=int )
+    train_parser.add_argument("--test_version",default=None, type=int, required=False ) #TODO: implelment logic such that a trained model can just be tested on a given dataset
 
-### Compound Poisson v3
-### python3 train.py --gpus 1 --dataset australia_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
+    train_parser.add_argument("--prefetch",type=int, default=8, help="Number of batches to prefetch" )
+    train_parser.add_argument("--hypertune",type=bool, default=False)
+    
 
-### Compound Poisson v4
-### python3 train.py --gpus 1 --dataset australia_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
+    train_args = train_parser.parse_known_args()[0]
+    
+    # add model specific args
+    model_args = MAP_NAME_NEURALMODEL[train_args.nn_name].parse_model_args(parent_parser)
+    
+    # add data specific args
+    data_args = MAP_NAME_DSET[train_args.dataset].parse_data_args(parent_parser)
 
-### Compound Poisson v5
-### python3 train.py --gpus 1 --dataset australia_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 5 --j_window_size 3 --target_range 0,6
+    # add glm specific args
+    glm_args = MAP_NAME_GLM[train_args.glm_name].parse_glm_args(parent_parser)
+    
+
+    if not train_args.hypertune:
+        train(train_args, data_args, glm_args, model_args)
+    
+    else:
+        train_tune(train_args, data_args, glm_args, model_args)
+    
 
 
-#UK Rain
-## Train All
-### Gamma
-#### python3 train.py --gpus 1 --dataset uk_rain --batch_size 64 --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --dataset uk_rain --batch_size 64 --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --dataset uk_rain --batch_size 64 --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --dataset uk_rain --batch_size 64 --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --dataset uk_rain --batch_size 64 --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
 
-## Train on Each Location in small group of cities - Test Only on single location: "London","Cardiff","Glasgow","Manchester","Birmingham","Liverpool","Edinburgh","Dublin","Preston","Truro","Bangor","Plymouth","Norwich","StDavids","Salford","Hull"
-#London
-### Gamma
-#### python3 train.py --gpus 1 --locations London --locations_test London --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations London --locations_test London --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations London --locations_test London --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations London --locations_test London --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations London --locations_test London --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
 
-#Cardiff
-### Gamma
-#### python3 train.py --gpus 1 --locations Cardiff --locations_test Cardiff --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Cardiff --locations_test Cardiff --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Cardiff --locations_test Cardiff --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Cardiff --locations_test Cardiff --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Cardiff --locations_test Cardiff --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Glasgow
-### Gamma
-#### python3 train.py --gpus 1 --locations Glasgow --locations_test Glasgow --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Glasgow --locations_test Glasgow --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Glasgow --locations_test Glasgow --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Glasgow --locations_test Glasgow --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Glasgow --locations_test Glasgow --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Manchester
-### Gamma
-#### python3 train.py --gpus 1 --locations Manchester --locations_test Manchester --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Manchester --locations_test Manchester --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Manchester --locations_test Manchester --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Manchester --locations_test Manchester --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Manchester --locations_test Manchester --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Birmingham
-### Gamma
-#### python3 train.py --gpus 1 --locations Birmingham --locations_test Birmingham --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Birmingham --locations_test Birmingham --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Birmingham --locations_test Birmingham --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Birmingham --locations_test Birmingham --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Birmingham --locations_test Birmingham --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Liverpool
-### Gamma
-#### python3 train.py --gpus 1 --locations Liverpool --locations_test Liverpool --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Liverpool --locations_test Liverpool --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Liverpool --locations_test Liverpool --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Liverpool --locations_test Liverpool --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Liverpool --locations_test Liverpool --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Edinburgh
-### Gamma
-#### python3 train.py --gpus 1 --locations Edinburgh --locations_test Edinburgh --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Edinburgh --locations_test Edinburgh --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Edinburgh --locations_test Edinburgh --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Edinburgh --locations_test Edinburgh --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Edinburgh --locations_test Edinburgh --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Dublin
-### Gamma
-#### python3 train.py --gpus 1 --locations Dublin --locations_test Dublin --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Dublin --locations_test Dublin --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Dublin --locations_test Dublin --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Dublin --locations_test Dublin --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Dublin --locations_test Dublin --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Preston
-### Gamma
-#### python3 train.py --gpus 1 --locations Preston --locations_test Preston --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Preston --locations_test Preston --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Preston --locations_test Preston --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Preston --locations_test Preston --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Preston --locations_test Preston --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Truro
-### Gamma
-#### python3 train.py --gpus 1 --locations Truro --locations_test Truro --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Truro --locations_test Truro --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Truro --locations_test Truro --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Truro --locations_test Truro --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Truro --locations_test Truro --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Bangor
-### Gamma
-#### python3 train.py --gpus 1 --locations Bangor --locations_test Bangor --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Bangor --locations_test Bangor --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Bangor --locations_test Bangor --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Bangor --locations_test Bangor --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Bangor --locations_test Bangor --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Plymouth
-### Gamma
-#### python3 train.py --gpus 1 --locations Plymouth --locations_test Plymouth --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Plymouth --locations_test Plymouth --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Plymouth --locations_test Plymouth --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Plymouth --locations_test Plymouth --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Plymouth --locations_test Plymouth --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Norwich
-### Gamma
-#### python3 train.py --gpus 1 --locations Norwich --locations_test Norwich --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Norwich --locations_test Norwich --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Norwich --locations_test Norwich --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Norwich --locations_test Norwich --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Norwich --locations_test Norwich --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#StDavids
-### Gamma
-#### python3 train.py --gpus 1 --locations StDavids --locations_test StDavids --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations StDavids --locations_test StDavids --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations StDavids --locations_test StDavids --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations StDavids --locations_test StDavids --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations StDavids --locations_test StDavids --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Salford
-### Gamma
-#### python3 train.py --gpus 1 --locations Salford --locations_test Salford --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Salford --locations_test Salford --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Salford --locations_test Salford --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Salford --locations_test Salford --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Salford --locations_test Salford --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2
-
-#Hull
-### Gamma
-#### python3 train.py --gpus 1 --locations Hull --locations_test Hull --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name gamma_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.4,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### LogNormal
-#### python3 train.py --gpus 1 --locations Hull --locations_test Hull --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name lognormal_hurdle --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --target_range 0,4
-### CP v2
-#### python3 train.py --gpus 1 --locations Hull --locations_test Hull --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 2 --max_j 12 --target_range 0,2
-### CP v3
-#### python3 train.py --gpus 1 --locations Hull --locations_test Hull --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6 --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.5,6.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --pos_weight 1.0 --cp_version 3 --max_j 12 --target_range 0,6
-### CP v4
-#### python3 train.py --gpus 1 --locations Hull --locations_test Hull --vertical_shift 1 --horizontal_shift 1 --gen_size 10 --dataset uk_rain --nn_name HLSTM --glm_name DGLM --max_epochs 150 --target_distribution_name compound_poisson --mu_distribution_name uniform_positive --mu_link_name xshiftn_relu_timesm_yshifteps --mu_params 0.1,10.0 --dispersion_distribution_name uniform_positive --dispersion_link_name xshiftn_relu_timesm_yshifteps --disp_params 0.5,6.0 --pos_weight 1.0 --p_link_name divn_sigmoid_clampeps_yshiftm --p_params 2,1 --cp_version 4 --j_window_size 3 --target_range 0,2

@@ -7,7 +7,7 @@ RelevantPapers/*
 # Python / IDE files
 .vscode/settings*
 *__pycache__
-
+.vscode/*
 
 # Large Data folders
 Checkpoints/*

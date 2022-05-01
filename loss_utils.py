@@ -119,7 +119,9 @@ class LogNormalHurdleNLLLoss(_Loss):
             return {
                 'pred_acc':mean.new_tensor(0.0),
                 'pred_rec':mean.new_tensor(0.0),
-                'pred_mse':mean.new_tensor(0.0)
+                'pred_mse':mean.new_tensor(0.0),
+                'pred_r10mse':mean.new_tensor(0.0)
+
             }
         #Classification losses
         pred_rain_bool = torch.where( logits>=0.0, 1.0, 0.0)
@@ -133,11 +135,21 @@ class LogNormalHurdleNLLLoss(_Loss):
             mean.view((1,-1))[indices_rainydays],
             rain.view((1,-1))[indices_rainydays]
         ) 
+
+
+        indices_r10days = torch.where(rain.view( (1,-1))>10)
+        pred_r10mse = torch.nn.functional.mse_loss(
+            mean.view((1,-1))[indices_r10days],
+            rain.view((1,-1))[indices_r10days]
+        )
+
         #MSE on days it did rain
         
-        pred_metrics = {'pred_acc': pred_acc,
-                        'pred_rec':pred_rec,
-                            'pred_mse': pred_mse }
+        pred_metrics = {'pred_acc': pred_acc.detach(),
+                        'pred_rec':pred_rec.detach(),
+                            'pred_mse': pred_mse.detach(),
+                            'pred_r10mse': pred_r10mse.detach()
+ }
         return pred_metrics
 
 class GammaHurdleNLLLoss(_Loss):
@@ -245,26 +257,40 @@ class GammaHurdleNLLLoss(_Loss):
     def prediction_metrics(self, rain, did_rain, mean, logits, **kwargs):
         if mean.numel() == 0:
             return {
-                'pred_acc':mean.new_tensor(0.0),
-                'pred_rec':mean.new_tensor(0.0),
-                'pred_mse':mean.new_tensor(0.0)
+                'pred_acc':None,
+                'pred_rec':None,
+                'pred_mse':None,
+                'pred_r10mse':None
             }
 
         pred_rain_bool = torch.where( logits>=0.0, 1.0, 0.0)
-        pred_acc = torch.mean(  torch.where( pred_rain_bool==did_rain, 1.0, 0.0) )
-        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum() if did_rain.sum()>0 else torch.as_tensor(1.0, device=pred_rain_bool.device)
+        pred_acc = torch.mean(  torch.where( pred_rain_bool==did_rain, 1.0, 0.0) ).detach()
+        pred_rec = (did_rain*pred_rain_bool).sum() / did_rain.sum() if did_rain.sum()>0 else torch.as_tensor(1.0, device=pred_rain_bool.device).detach()
 
-        indices_rainydays = torch.where(did_rain.view( (1,-1))==1.0)
+        indices_rainydays = torch.where(did_rain==1.0)
 
-        pred_mse = torch.nn.functional.mse_loss(
-            mean.view((1,-1))[indices_rainydays],
-            rain.view((1,-1))[indices_rainydays]
-            ) #MSE on days it did rain
+        if indices_rainydays[0].numel()>0.5:
+            pred_mse = torch.nn.functional.mse_loss(
+                mean[indices_rainydays],
+                rain[indices_rainydays]
+                ).detach() #MSE on days it did rain
+        else:
+            pred_mse = None
         
+        indices_r10days = torch.where(rain>10.0)
+        if indices_r10days[0].numel()>0:
+            pred_r10mse = torch.nn.functional.mse_loss(
+                mean[indices_r10days],
+                rain[indices_r10days]
+            ).detach()
+        else:
+            pred_r10mse = None
 
-        pred_metrics = {'pred_acc': pred_acc.detach(),
-                            'pred_rec': pred_rec.detach(),
-                            'pred_mse': pred_mse.detach(),
+        pred_metrics = {'pred_acc': pred_acc,
+                            'pred_rec': pred_rec,
+                            'pred_mse': pred_mse,
+                            'pred_r10mse': pred_r10mse
+
                              }
         return pred_metrics
         
@@ -366,8 +392,8 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             
             ll = A + B + C
 
-        #------------- Version 3 - using 0<j<=48 and jensens inequality to convert log(sum(Wj)) to sum(log(Wj))
-        # Calculate jmax. Then calculate a range around j an duse this
+        #------------- Version 3 - using 0<j<=J and jensens inequality to convert log(sum(Wj)) to sum(log(Wj))
+        
         elif self.cp_version == 3:
             j=self.j
             A = torch.log(L.pow(-1))
@@ -532,7 +558,8 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             return {
                 'pred_acc':mean.new_tensor(0.0),
                 'pred_rec':mean.new_tensor(0.0),
-                'pred_mse':mean.new_tensor(0.0)
+                'pred_mse':mean.new_tensor(0.0),
+                'pred_r10mse':mean.new_tensor(0.0)
             }
             
         pred_rain_bool = torch.where( mean>min_rain_value, mean.new_tensor(1.0), mean.new_tensor(0.0))
@@ -548,9 +575,16 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             rain.view((1,-1))[indices_rainydays]
         ) #MSE on days it did rain
 
+        indices_r10days = torch.where(rain.view( (1,-1))>10)
+        pred_r10mse = torch.nn.functional.mse_loss(
+            mean.view((1,-1))[indices_r10days],
+            rain.view((1,-1))[indices_r10days]
+        )
+
         
         pred_metrics = {'pred_acc': pred_acc.detach(),
                             'pred_rec': pred_rec.detach(),
                             'pred_mse': pred_mse.detach(),
+                            'pred_r10mse': pred_r10mse.detach()
                              }
         return pred_metrics

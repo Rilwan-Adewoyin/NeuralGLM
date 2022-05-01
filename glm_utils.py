@@ -282,6 +282,7 @@ def default_collate_concat(batch):
     """
     elem = batch[0]
     elem_type = type(elem)
+
     if isinstance(elem, torch.Tensor):
         out = None
         
@@ -298,17 +299,7 @@ def default_collate_concat(batch):
                 pass
         res =  torch.concat( batch, 0 )
         return res
-
-    if isinstance(elem, torch.Tensor):
-        out = None
-        if torch.utils.data.get_worker_info() is not None:
-            # If we're in a background process, concatenate directly into a
-            # shared memory tensor to avoid an extra copy
-            numel = sum(x.numel() for x in batch)
-            storage = elem.storage()._new_shared(numel)
-            out = elem.new(storage).resize_(len(batch), *list(elem.size()))
-        return torch.stack(batch, 0, out=out)        
-
+    
     elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
             and elem_type.__name__ != 'string_':
         if elem_type.__name__ == 'ndarray' or elem_type.__name__ == 'memmap':
@@ -324,6 +315,7 @@ def default_collate_concat(batch):
         return torch.tensor(batch)
     elif isinstance(elem, string_classes):
         return batch
+        # return sum(batch, [ ])
     elif isinstance(elem, collections.abc.Mapping):
         return {key: default_collate_concat([d[key] for d in batch]) for key in elem}
     elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple

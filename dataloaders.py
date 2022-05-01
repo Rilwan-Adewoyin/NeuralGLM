@@ -30,6 +30,7 @@ import glob
 from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.data import IterableDataset
 import random
+from collections import defaultdict
 
 """
     dataloaders.py provides functionality for loading in the following Datasets:
@@ -958,15 +959,13 @@ class Generator_mf(Generator):
 class Era5EobsDataset(IterableDataset):
 
     def __init__(self, dconfig, start_date, end_date, target_range,
-     locations=None, loc_count=None, 
-     scaler_features=None, scaler_target=None, workers=1,
-     shuffle=False, **kwargs ) -> None:
+        locations=None, loc_count=None, scaler_features=None, 
+        scaler_target=None, workers=1, shuffle=False, **kwargs ) -> None:
         super(Era5EobsDataset).__init__()
 
         self.dconfig = dconfig
         self.target_range = target_range
         self.locations = locations if locations else dconfig.locations
-        self.locations_test = dconfig.locations_test
         self.loc_count = loc_count if loc_count else dconfig.loc_count
         self.end_date = end_date
         start_idx_feat, start_idx_tar = self.get_idx(start_date)
@@ -1008,7 +1007,6 @@ class Era5EobsDataset(IterableDataset):
         
             # Otherwise set up parameters to use the normal dataset
         else:
-            
             os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
             self.cache_path = os.path.join( self.dconfig.data_dir, "cache",
                 f"start-{start_date}-end-{end_date}_lookbacktarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-locs-{'_'.join([loc[:3] for loc in self.locations])}")
@@ -1052,9 +1050,7 @@ class Era5EobsDataset(IterableDataset):
             }, ignore_index=True)
             
             premade_dsets.to_csv( premade_dset_path, index=False)
-        
-
-                    
+                   
         # Create buffers for scaler params
         self.features_scale = torch.as_tensor( self.scaler_features.scale_ )
         self.features_mean = torch.as_tensor( self.scaler_features.mean_ )
@@ -1114,29 +1110,16 @@ class Era5EobsDataset(IterableDataset):
                 if not hasattr(self, 'cache_len'):
                     self.cache_len = self.cache_end_idx + 1 - self.cache_start_idx
                 
-                # Adding Shuffling
-                # This is shuffling in sequence of days we pass to the model
+                # # Adding Shuffling
+                # # This is shuffling in sequence of days we pass to the model
                 if self.shuffle:
                     # We adjust the start idx of model field and rain data
-                    #TODO: Adjust for multiple worker
-                    
-                    remainder_elements = self.max_cache_len % self.dconfig.lookback_target
-                    self.start_idx_increment = random.randint(0, self.dconfig.lookback_target)
-                    
-                    if self.start_idx_increment > remainder_elements:
-                        # Then we reduce the cache_end_idx and cache_len
-                        self.cache_start_idx += self.start_idx_increment
-                        self.cache_end_idx += ( remainder_elements - self.dconfig.lookback_target) 
-                        self.cache_len += self.cache_start_idx - self.cache_end_idx
-                    
-                    elif self.start_idx_increment <= remainder_elements:
-                        self.cache_start_idx += self.start_idx_increment
-                        self.cache_end_idx  += self.start_idx_increment
-                        self.cache_len = self.cache_len
-                
-                else:
-                    self.start_idx_increment = 0
-                
+
+                    # The amount to increment the target, e.g. number of days 
+                    # Debug
+                    self.target_sub_idx_increment = random.randint(0, self.dconfig.lookback_target)
+                    self.feature_sub_idx_increment = self.target_sub_idx_increment*4
+          
                 idx = copy.deepcopy(self.cache_start_idx)
 
                 while idx < self.cache_end_idx :
@@ -1145,7 +1128,8 @@ class Era5EobsDataset(IterableDataset):
                     _slice = slice( idx , idx  + adj_iter_chunk_size)
                     dict_data = { name:torch.tensor( xr_cache[name].isel(sample_idx=_slice).data )
                                     for name in ['input','target','mask','idx_loc_in_region'] }
-                    
+                    dict_data['li_locations'] = xr_cache['li_locations'].isel(sample_idx=_slice).data 
+                                                      
                     dict_data['input'] = (dict_data['input'] - self.features_mean )/self.features_scale
                     dict_data['target'] = dict_data['target']*self.target_scale
                     
@@ -1154,24 +1138,28 @@ class Era5EobsDataset(IterableDataset):
                     dict_data['target'] = dict_data['target'].to(torch.float16).squeeze()
                     dict_data['mask'] = dict_data['mask'].to(torch.bool).squeeze()
 
-                    dict_data ={ k:v for k,v in dict_data.items()}
+                    # dict_data = { k:v for k,v in dict_data.items() }
 
                     idx += adj_iter_chunk_size
-                    # yield dict_data        
-
+                      
                     if type(dict_data['input'])==tuple:
-                        li_dicts = [ {key:dict_data[key][idx].unsqueeze(0) for key in dict_data.keys()} for idx in range(len(dict_data['target'])) ]
+                        li_dicts = [ {key:dict_data[key][idx].unsqueeze(0) if key!="li_locations" else dict_data[key][idx] for key in dict_data.keys()} for idx in range(len(dict_data['target'])) ]
                         
                         
                     elif adj_iter_chunk_size==1:
                         dict_data['idx_loc_in_region'] = dict_data['idx_loc_in_region'].squeeze(0)
-                        li_dicts = [ {k:v.unsqueeze(0) for k,v in dict_data.items()} ]
+                        li_dicts = [ {k:v.unsqueeze(0) if k!="li_locations" else v for k,v in dict_data.items()} ]
                         
-                    
                     else:
-                        _ =  {k:v.unbind() for k,v in dict_data.items()} 
-                        li_dicts = [ {key:_[key][idx].unsqueeze(0) for key in dict_data.keys() } for idx in range(len(dict_data['target'])) ]
+                        _ =  {k:v.unbind() if k!="li_locations" else v for k,v in dict_data.items()} 
+                        li_dicts = [ {key:_[key][idx].unsqueeze(0) if key!="li_locations" else _[key][idx] for key in dict_data.keys() } for idx in range(len(dict_data['target'])) ]
                     
+                    # shuffling data 
+                    # unbundling weekly batches and shifting data forward n days 
+                    # such that the weekly periods are different
+                    if self.shuffle and self.target_sub_idx_increment>0:
+                        li_dicts = self.cache_shuffle(li_dicts)
+                        
                     # Filter li_dicts that do not have masks
                     li_dicts = [ dict_ for dict_ in li_dicts if dict_['mask'].logical_not().any()]
                     
@@ -1206,8 +1194,9 @@ class Era5EobsDataset(IterableDataset):
                                 "input":( ("sample_idx","lookback_feature","h_feat","w_feat","d"), torch.concat(dict_data['input']).numpy() ),
                                 "target": ( ("sample_idx","lookback_target","h_target","w_target"),torch.concat(dict_data['target']).numpy() ),
                                 "mask": ( ("sample_idx","lookback_target","h_target","w_target"),torch.concat(dict_data['mask']).numpy() ),
-                                "idx_loc_in_region": ( ("sample_idx","h_w"), np.concatenate(dict_data['idx_loc_in_region'])) 
-                                 }
+                                "idx_loc_in_region": ( ("sample_idx","h_w"), np.concatenate(dict_data['idx_loc_in_region']) ) ,
+                                "li_locations": ( ("sample_idx"), dict_data['li_locations'] )
+                                }
                             }
                                            
                     if not os.path.exists(self.cache_path):
@@ -1283,29 +1272,94 @@ class Era5EobsDataset(IterableDataset):
                 encoding = {var: comp for var in xr_curr.data_vars}
                 xr_curr.to_netcdf(self.cache_path, mode='w', encoding=encoding )
                 
+    def cache_shuffle(self, li_dicts):
+        # shuffling data 
+        # unbundling weekly batches and shifting data forward n days 
+        # such that the weekly periods are different
+        keys = list(li_dicts[0].keys())
 
+        dict_loc_unbundled = {}
+        dict_loc_batched = {}
 
-    # def __len__(self):
+        # Unbundling each variable for each location
+        for loc in self.locations:
+            loc_dict = { }
 
-    #     if self.cache_exists:
-    #         if hasattr(self, 'cache_len_per_worker'):
-    #             l =  self.cache_len_per_worker
-            
-    #         elif hasattr(self, 'cache_len'):
-    #             l = int( self.cache_len / max(1,self.workers) ) 
-            
-    #         elif hasattr(self,'cache_start_idx') and hasattr(self,'cache_end_idx'):
-    #             l =  ( self.cache_end_idx - self.cache_start_idx )//max(self.workers,1)
-
-    #     else:
-    #         if hasattr(self.mf_data, 'data_len_per_worker'):
-    #             l = (self.mf_data.data_len_per_worker // self.mf_data.lookback ) * self.loc_count
+            for key in keys:
                 
-    #         elif hasattr(self.mf_data, 'data_len_per_location'):
-    #             l = self.mf_data.data_len_per_location * self.loc_count
+                #Concat all elements for each variable
+                if isinstance( li_dicts[0][key], torch.Tensor ):
+                    
+                    
+                    if key in ["input","idx_loc_in_region"]:
+                        s = li_dicts[0][key].shape[-1] 
+                        key_data = torch.cat( [ dict_[key] for dict_ in li_dicts if dict_["li_locations"]==loc ], dim=0 ).reshape(-1, s)
+                    
+                    elif key in ['target','mask']:
+                        
+                        key_data = torch.cat( [ dict_[key] for dict_ in li_dicts if dict_["li_locations"]==loc ], dim=0 ).reshape( -1 )
 
-    #     return l
+                else:
+                    key_data = [ dict_[key] for dict_ in li_dicts if dict_["li_locations"]==loc ] 
+                                
+                loc_dict[key] = key_data
+                    
+            dict_loc_unbundled[loc] = loc_dict
         
+        # rebatching into weeks with increment
+        
+        for loc in self.locations:
+            dict_loc_batched[loc] = {}
+            # incrementing and batching
+            for key in keys:
+                
+                if key in ['target','mask']:
+                    dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][self.target_sub_idx_increment:]
+                    d = dict_loc_unbundled[loc][key]
+                    l = len(d)-self.dconfig.lookback_target
+                    dict_loc_batched[loc][key] = [ d[idx:idx+self.dconfig.lookback_target].unsqueeze(0) for idx in range(0, l, self.dconfig.lookback_target) ]
+
+                elif key in ['idx_loc_in_region']:
+                    # idx_loc_in_region only has one value per lookback_target.
+                    dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][:-1]
+                    d = dict_loc_unbundled[loc][key]
+                    l = len(d)
+                    dict_loc_batched[loc][key] = [ d[idx:idx+1] for idx in range(0, l, 1) ]
+
+                elif key in ['li_locations']:
+                    dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][self.target_sub_idx_increment:]
+                    d = dict_loc_unbundled[loc][key]
+                    l = len(d)-self.dconfig.lookback_target
+                    dict_loc_batched[loc][key] = [ d[idx:idx+self.dconfig.lookback_target] for idx in range(0, l, self.dconfig.lookback_target) ]
+
+                elif key in ['input']:
+                    dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][self.feature_sub_idx_increment:]
+                    d = dict_loc_unbundled[loc][key]
+                    l = len(d)-self.dconfig.lookback_feature
+                    dict_loc_batched[loc][key] = [ d[idx:idx+self.dconfig.lookback_feature].unsqueeze(0) for idx in range(0, l, self.dconfig.lookback_feature) ]
+
+        count = sum( len( dict_loc_batched[loc][keys[0]] ) for loc in self.locations )
+        li_dicts_shuffled = [ defaultdict(dict) for i in range(count) ]
+        
+        # Creating original list of dicts structure
+        for key in keys:
+            
+            # if key in ['target','mask','idx_loc_in_region']:
+            if key in ['target','mask']:
+                li_datums = sum( [ dict_loc_batched[loc][key] for loc in self.locations ], [] )
+            elif key in ['input']:
+                li_datums = sum( [ dict_loc_batched[loc][key] for loc in self.locations ], [] )
+            elif key in ['idx_loc_in_region']:
+                li_datums = sum( [ dict_loc_batched[loc][key] for loc in self.locations ], [] )
+            elif key == ['li_locations']:
+                li_datums = sum( [ dict_loc_batched[loc][key] for loc in self.locations ], [] )
+
+            for idx in range(count):
+                li_dicts_shuffled[idx][key] = li_datums[idx]
+        
+
+        return li_dicts_shuffled
+
     def preprocess_batch(self, feature, feature_mask, target, target_mask, normalize=True):
         
         # Converting to tensors
@@ -1331,9 +1385,9 @@ class Era5EobsDataset(IterableDataset):
             target = target*self.target_scale
         target.masked_fill_(target_mask, self.dconfig.mask_fill_value['rain'] )
 
-        li_feature, li_target, li_target_mask, idx_loc_in_region = self.location_extractor( feature, target, target_mask, self.locations)
+        li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs = self.location_extractor( feature, target, target_mask, self.locations)
         
-        dict_data = { k:v for k,v in zip(['input','target','mask','idx_loc_in_region' ], [li_feature, li_target, li_target_mask, idx_loc_in_region] ) }
+        dict_data = { k:v for k,v in zip(['input','target','mask','idx_loc_in_region','li_locations' ], [li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs] ) }
         return dict_data
 
     def get_idx(self, date:Union[np.datetime64,str] ):
@@ -1376,16 +1430,19 @@ class Era5EobsDataset(IterableDataset):
         # list of central h,w indexes from which to extract the region around
         if locations == ["All"]:
             li_hw_idxs = self.rain_data.get_locs_for_whole_map( self.dconfig, self.shuffle ) #[ ([upper_h, lower_h]. [left_w, right_w]), ... ]
+            li_locs = np.repeat(locations, len(li_hw_idxs)*len(target) )
+
         else:
             li_hw_idxs = [ self.rain_data.find_idx_of_loc_region( _loc, self.dconfig ) for _loc in locations ] #[ (h_idx,w_idx), ... ]
-        
+            li_locs = np.repeat(locations, len(target) )
+
         # Creating seperate datasets for each location
-        li_feature, li_target, li_target_mask = zip(*[ self.select_region( feature, target, target_mask, hw_idxs[0], hw_idxs[1] ) for hw_idxs in li_hw_idxs ] )
-                
+        li_feature, li_target, li_target_mask = zip(*[self.select_region( feature, target, target_mask, hw_idxs[0], hw_idxs[1] ) for hw_idxs in li_hw_idxs ] )
+
         # pair of indexes locating the central location within the grid region extracted for any location
         idx_loc_in_region = [ np.floor_divide( self.dconfig.outer_box_dims, 2)[np.newaxis,...] ]*len( torch.concat(li_feature) ) #This specifies the index of the central location of interest within the (h,w) patch    
         
-        return li_feature, li_target, li_target_mask, idx_loc_in_region
+        return li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs
     
     def select_region( self, mf, rain, rain_mask, h_idxs, w_idxs):
         """ Extract the region relating to a [h_idxs, w_idxs] pair
@@ -1547,10 +1604,10 @@ class Era5EobsDataset(IterableDataset):
         train_start_date = np.datetime64(dconfig.train_start,'D')
         train_end_date = (pd.Timestamp(dconfig.train_end) - pd.DateOffset(seconds=1) ).to_numpy()
 
-        val_start_date = np.datetime64(  dconfig.val_start,'D')
+        val_start_date = np.datetime64(dconfig.val_start,'D')
         val_end_date = (pd.Timestamp(dconfig.val_end) - pd.DateOffset(seconds=1) ).to_numpy()
 
-        test_start_date = np.datetime64(  dconfig.test_start,'D')
+        test_start_date = np.datetime64(dconfig.test_start,'D')
         test_end_date = (pd.Timestamp(dconfig.test_end) - pd.DateOffset(seconds=1) ).to_numpy()
 
         loc_count = len(dconfig.locations)  if \
