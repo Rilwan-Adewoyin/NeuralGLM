@@ -37,9 +37,9 @@ def train( train_args, data_args, glm_args, model_args ):
                                                 auto_insert_metric_name=True,
                                                 save_top_k=1)
                                              ] ,
-                            limit_train_batches = 2,
-                            limit_val_batches = 2,
-                            limit_test_batches = 2,
+                            # limit_train_batches = 2,
+                            # limit_val_batches = 2,
+                            # limit_test_batches = 2,
                             enable_checkpointing=True,
                             precision=16,
                             max_epochs=train_args.max_epochs,
