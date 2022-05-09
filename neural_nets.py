@@ -97,7 +97,7 @@ class HLSTM(nn.Module):
 
         parser.add_argument("--num_layers", default=4, type=int)
         parser.add_argument("--hidden_dim", default=64, type=int)
-        parser.add_argument("--dropout", default=0.1, type=float)
+        # parser.add_argument("--dropout", default=0.1, type=float)
         parser.add_argument("--dropoutw", default=0.35, type=float)
         parser.add_argument("--dropouto", default=0.25, type=float)
         parser.add_argument("--dropouti", default=0.25, type=float)

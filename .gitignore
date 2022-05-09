@@ -7,10 +7,13 @@ RelevantPapers/*
 # Python / IDE files
 .vscode/settings*
 *__pycache__
-.vscode/*
+.vscode*
 
 # Large Data folders
 Checkpoints/*
 
 #Shell scripts
 *.sh
+
+# Jupyter
+*.ipynb*

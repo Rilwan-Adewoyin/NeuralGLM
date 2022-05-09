@@ -23,6 +23,7 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 from typing import Dict, Any
 import json
 import pandas as pd
+import numpy as np
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
 def tuple_type(strings):
@@ -251,7 +252,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         elif step_name in ['test']:
             output =  {'loss':loss, 'pred_mu':pred_mu.detach().to('cpu'), 'pred_disp':pred_disp.detach().to('cpu'),  
                             'target_did_rain':target_did_rain.detach().to('cpu'), 'target_rain_value':target_rain_value.detach().to('cpu'), 
-                            'pred_metrics':pred_metrics,
+                            'pred_metrics':pred_metrics
                             }
                             
             if self.task == "uk_rain": output['idx_loc_in_region'] = idx_loc_in_region.detach().to('cpu')
@@ -259,7 +260,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
             if self.neural_net.p_variable_model:
                 output['composite_losses'] = composite_losses
-                output['pred_p'] = pred_p
+                output['pred_p'] = pred_p.detach().to('cpu')
+                
             return output
 
     def training_step(self, batch, batch_idx):
@@ -275,7 +277,9 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             if output['pred_metrics']['pred_acc']: self.log("train_metric/acc",output['pred_metrics']['pred_acc'],  on_step=False, on_epoch=True )
             if output['pred_metrics']['pred_rec']: self.log("train_metric/recall",output['pred_metrics']['pred_rec'], on_step=False, on_epoch=True )
             if output['pred_metrics']['pred_mse']: self.log("train_metric/mse_rain",output['pred_metrics']['pred_mse'],  on_step=False, on_epoch=True )
-            if output['pred_metrics']['pred_r10mse']: self.log("train_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'] , on_step=False, on_epoch=True)
+            if output['pred_metrics']['pred_r10mse']: 
+                if not torch.isnan( output['pred_metrics']['pred_r10mse'] ).any():
+                    self.log("train_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'] , on_step=False, on_epoch=True)
 
 
         return output
@@ -294,7 +298,9 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             if output['pred_metrics']['pred_acc']: self.log("val_metric/acc",output['pred_metrics']['pred_acc'] , on_step=False, on_epoch=True)
             if output['pred_metrics']['pred_rec']: self.log("val_metric/recall",output['pred_metrics']['pred_rec'] , on_step=False, on_epoch=True)
             if output['pred_metrics']['pred_mse']: self.log("val_metric/mse_rain",output['pred_metrics']['pred_mse'],  on_step=False, on_epoch=True )
-            if output['pred_metrics']['pred_r10mse']: self.log("val_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'] , on_step=False, on_epoch=True)
+            if output['pred_metrics']['pred_r10mse']: 
+                if not torch.isnan( output['pred_metrics']['pred_r10mse'] ).any():
+                    self.log("val_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'] , on_step=False, on_epoch=True)
 
 
         return output
@@ -325,157 +331,148 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         if output.get('pred_metrics', None):
             if output['pred_metrics']['pred_acc']: self.log("test_metric/acc",output['pred_metrics']['pred_acc'] , on_step=False, on_epoch=True)
             if output['pred_metrics']['pred_rec']: self.log("test_metric/recall",output['pred_metrics']['pred_rec'] , on_step=False, on_epoch=True)
-            if output['pred_metrics']['pred_mse']: self.log("test_metric/mse_rain",output['pred_metrics']['pred_mse'] , on_step=False, on_epoch=True, )
-            if output['pred_metrics']['pred_r10mse']: self.log("test_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'] , on_step=False, on_epoch=True, )
+            if output['pred_metrics']['pred_mse']: self.log("test_metric/mse_rain",output['pred_metrics']['pred_mse'] , on_step=False, on_epoch=True )
+            if output['pred_metrics']['pred_r10mse']: 
+                if not torch.isnan( output['pred_metrics']['pred_r10mse'] ).any().item():
+                    self.log("test_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'], on_step=False, on_epoch=True, )
 
         if self.task == "uk_rain": 
             output['li_locations'] = batch.pop('li_locations',None)
         return output
 
     def test_epoch_end(self, outputs: EPOCH_OUTPUT) -> None:
-        try:
-            # Saving the predictions and targets from the test sets
-            pred_mu = torch.cat( [output['pred_mu'] for output in outputs], dim=0 )
-            pred_disp = torch.cat( [output['pred_disp'] for output in outputs], dim=0 )
-            
-
-            if self.neural_net.p_variable_model:
-                pred_p = torch.cat( [output['pred_p'] for output in outputs], dim=0 )
-            else:
-                pred_p = None
-            
-            #target data
-            target_did_rain = torch.cat( [output['target_did_rain'] for output in outputs], dim=0 )
-            target_rain_value = torch.cat( [output['target_rain_value'] for output in outputs], dim=0 )
-            
-            #unscaling predictive distribution
-            pred_mu_unscaled, pred_disp_unscaled, pred_p_unscaled = self.target_distribution.unscale_distribution( pred_mu, pred_disp, pred_p, self.scaler_target )
-
-            pred_mu_unscaled = pred_mu_unscaled.cpu().numpy()
-            pred_disp_unscaled = pred_disp_unscaled.cpu().numpy()
-            pred_p_unscaled=pred_p_unscaled.cpu().numpy()
-
-            target_rain_unscaled = self.unscale_rain(target_rain_value, self.scaler_target)
-            target_rain_unscaled = target_rain_unscaled.cpu().numpy()
-
-            # Split predictions by location
-            test_dl = self.trainer.test_dataloaders[0]
-
-            if self.task == "australia_rain":
-                locations = [ ds.location for ds in test_dl.dataset.datasets]
-                cumulative_sizes = [0] + test_dl.dataset.cumulative_sizes
-                
-                dict_location_data = {}
-                for idx, loc in enumerate(locations):
-                    if cumulative_sizes==0:
-                        continue
-                    s_idx = cumulative_sizes[idx]
-                    e_idx = cumulative_sizes[idx+1]
-
-                    lookback = test_dl.dataset.datasets[idx].lookback
-                    dates = test_dl.dataset.datasets[idx].dates #dates in dataset that are valid
-                    indexes_filtrd = test_dl.dataset.datasets[idx].indexes_filtrd #indexes_filtrd
-                    
-                    date_windows = [ dates[idx-lookback:idx] for idx in indexes_filtrd[lookback: ] ]
-
-                    data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
-                            'pred_disp':pred_disp_unscaled[s_idx:e_idx],
-                            'target_did_rain':target_did_rain[s_idx:e_idx],
-                            'target_rain_value':target_rain_unscaled[s_idx:e_idx],
-                            'date':date_windows }
-                    
-                
-                    if self.neural_net.p_variable_model:
-                        data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
-
-                    dict_location_data[loc] = data
-
-                dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
-                file_path = os.path.join( dir_path, "test_output.pkl" ) 
-                with open( file_path, "wb") as f:
-                    pickle.dump( dict_location_data, f )
-            
-            elif self.task == "uk_rain":
-
-                idx_loc_in_region = torch.cat( [output['idx_loc_in_region'] for output in outputs], dim=0 )
-                dconfig = test_dl.dataset.dconfig
-                # locations = dconfig.locations_test
-                
-                # count_per_location = dconfig.test_set_size_elements / self.dconfig.loc_count_test
-                # cumulative_sizes = [ int(idx*count_per_location) for idx in range( len(locations)+1) ]
-
-                dict_location_data = {}
-                dates = pd.date_range( end=dconfig.test_end, start=dconfig.test_start, freq='D', normalize=True)
-                lookback = dconfig.lookback_target
-
-                # Saving predictions for each location
-                # for idx, loc in enumerate(locations):
-                #     s_idx = cumulative_sizes[idx]
-                #     e_idx = cumulative_sizes[idx+1]
-
-                #     date_windows = [ dates[idx:idx+lookback] for idx in range( 0, s_idx-e_idx , lookback )  ]
-
-                #     data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
-                #             'pred_disp':pred_disp_unscaled[s_idx:e_idx],
-                #             'target_did_rain':target_did_rain[s_idx:e_idx],
-                #             'target_rain_value':target_rain_unscaled[s_idx:e_idx],
-                #             # 'idx_loc_in_region':idx_loc_in_region[s_idx:e_idx],
-                #             'date':date_windows }
-                    
-                #     if self.neural_net.p_variable_model:
-                #         data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
-
-                #     dict_location_data[loc] = data
-
-                #Determining the start and end index for each location's portion of the dataset   
-                locations = sum( [output['li_locations'] for output in outputs],[])          
-                start_idxs_for_location_subset = [ (idx,loc) for idx,loc in enumerate(locations) if (idx in [0,len(locations)-1] or loc!=locations[idx-1]) ]
-
-                for idx  in range( len( start_idxs_for_location_subset) ):
-
-                    loc = start_idxs_for_location_subset[idx][1]
-                    s_idx = start_idxs_for_location_subset[idx][0]
-                    e_idx = start_idxs_for_location_subset[idx+1][0]
-
-                    date_windows = [ dates[i:i+lookback] for i in range( 0, (e_idx-s_idx)*lookback , lookback )  ]
-
-                    data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
-                            'pred_disp':pred_disp_unscaled[s_idx:e_idx],
-                            'target_did_rain':target_did_rain[s_idx:e_idx],
-                            'target_rain_value':target_rain_unscaled[s_idx:e_idx],
-                            'date':date_windows }
-                    
-                    if self.neural_net.p_variable_model:
-                        data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
-
-                    dict_location_data[loc] = data
-
-                dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
-                file_path = os.path.join( dir_path, "test_output.pkl" ) 
-                with open( file_path, "wb") as f:
-                    pickle.dump( dict_location_data, f )
-                
-                # Recording losses on test set and summarised information about test run
-                summary = {
-                    'train_start': self.dconfig.train_start,
-                    'train_end':self.dconfig.train_end,
-                    'val_start':self.dconfig.val_start,
-                    'val_end':self.dconfig.val_end,
-                    'test_start':self.dconfig.test_start,
-                    'test_end':self.dconfig.test_end,
-                    'test_mse':  torch.stack( [output['pred_metrics']['pred_mse'] for output in outputs], dim=0 ).mean().to('cpu').squeeze().item()  ,
-                    'test_r10mse':  torch.stack( [output['pred_metrics']['pred_r10mse'] for output in outputs], dim=0 ).mean().to('cpu').squeeze().item()  ,
-                    'test_acc': torch.stack( [output['pred_metrics']['pred_acc'] for output in outputs], dim=0 ).mean().to('cpu').squeeze().item() ,
-                    'test_rec':torch.stack( [output['pred_metrics']['pred_rec'] for output in outputs], dim=0 ).mean().to('cpu').squeeze().item() ,
-                }
-                file_path_summary = os.path.join(dir_path, "summary.json")
-                with open(file_path_summary, "w") as f:
-                    json.dump( summary, f)
-
+    
+        # Saving the predictions and targets from the test sets
+        pred_mu = torch.cat( [output['pred_mu'] for output in outputs], dim=0 )
+        pred_disp = torch.cat( [output['pred_disp'] for output in outputs], dim=0 )
         
-        except Exception as e:
-            print(e)
-            pass
+
+        if self.neural_net.p_variable_model:
+            pred_p = torch.cat( [output['pred_p'] for output in outputs], dim=0 )
+        else:
+            pred_p = None
+        
+        #target data
+        target_did_rain = torch.cat( [output['target_did_rain'] for output in outputs], dim=0 )
+        target_rain_value = torch.cat( [output['target_rain_value'] for output in outputs], dim=0 )
+        
+        #unscaling predictive distribution
+        pred_mu_unscaled, pred_disp_unscaled, pred_p_unscaled = self.target_distribution.unscale_distribution(pred_mu, pred_disp, pred_p, self.scaler_target)
+
+        pred_mu_unscaled = pred_mu_unscaled.cpu().to(torch.float16).numpy()
+        pred_disp_unscaled = pred_disp_unscaled.cpu().to(torch.float16).numpy()
+        pred_p_unscaled = pred_p_unscaled.cpu().to(torch.float16).numpy()
+
+        target_rain_unscaled = self.unscale_rain(target_rain_value, self.scaler_target)
+        target_rain_unscaled = target_rain_unscaled.cpu().numpy()
+
+        # Split predictions by location
+        test_dl = self.trainer.test_dataloaders[0]
+
+        if self.task == "australia_rain":
+            locations = [ ds.location for ds in test_dl.dataset.datasets]
+            cumulative_sizes = [0] + test_dl.dataset.cumulative_sizes
+            
+            dict_location_data = {}
+            for idx, loc in enumerate(locations):
+                if cumulative_sizes==0:
+                    continue
+                s_idx = cumulative_sizes[idx]
+                e_idx = cumulative_sizes[idx+1]
+
+                lookback = test_dl.dataset.datasets[idx].lookback
+                dates = test_dl.dataset.datasets[idx].dates #dates in dataset that are valid
+                indexes_filtrd = test_dl.dataset.datasets[idx].indexes_filtrd #indexes_filtrd
+                
+                date_windows = [ dates[idx-lookback:idx] for idx in indexes_filtrd[lookback: ] ]
+
+                data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
+                        'pred_disp':pred_disp_unscaled[s_idx:e_idx],
+                        'target_did_rain':target_did_rain[s_idx:e_idx],
+                        'target_rain_value':target_rain_unscaled[s_idx:e_idx],
+                        'date':date_windows }
+                
+            
+                if self.neural_net.p_variable_model:
+                    data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
+
+                dict_location_data[loc] = data
+
+            dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
+            file_path = os.path.join( dir_path, "test_output.pkl" ) 
+            with open( file_path, "wb") as f:
+                pickle.dump( dict_location_data, f )
+        
+        elif self.task == "uk_rain":
+
+            dconfig = test_dl.dataset.dconfig
+                        
+            dict_location_data = {}
+            lookback = dconfig.lookback_target
+
+            #Determining the start and end index for each location's portion of the dataset   
+            locations = np.repeat( sum( [output['li_locations'] for output in outputs],[]), dconfig.lookback_target ).tolist()
+
+            #Assuming we consider predictions in blocks of 7 (lookback) the below marks is the ith 7 block of predictions where i is where new data for another location starts
+            start_idxs_for_location_subset = [ (idx,loc) for idx,loc in enumerate(locations) if (idx==0 or loc!=locations[idx-1]) ]
+            end_idxs_for_location_subset = start_idxs_for_location_subset[1:] + [ ( len(locations) , "End" ) ] 
+
+            assert end_idxs_for_location_subset[-1][0] == pred_mu_unscaled.shape[0], "The final end idxs should be the same as the length of the overall dataset"
+            
+            for idx  in range( len( start_idxs_for_location_subset)-1 ):
+
+                loc = start_idxs_for_location_subset[idx][1]
+                s_idx = start_idxs_for_location_subset[idx][0]
+                e_idx = end_idxs_for_location_subset[idx][0]
+
+                # Need to concat data for each city
+                s_idx_adj = s_idx
+                e_idx_adj = e_idx
+
+                datum_start_date = dconfig.test_start if (loc not in dict_location_data) else ( dict_location_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
+                date_windows = pd.date_range( start=datum_start_date, periods=(e_idx_adj-s_idx_adj), freq='D', normalize=True  )
+
+                data = {'pred_mu':pred_mu_unscaled[s_idx_adj:e_idx_adj],
+                        'pred_disp':pred_disp_unscaled[s_idx_adj:e_idx_adj],
+                        'target_did_rain':target_did_rain[s_idx_adj:e_idx_adj],
+                        'target_rain_value':target_rain_unscaled[s_idx_adj:e_idx_adj],
+                        'date':np.asarray( date_windows ),
+                        'pred_p': pred_p_unscaled[s_idx_adj:e_idx_adj] if self.neural_net.p_variable_model else np.array([], dtype=np.float16)   }
+                
+                if loc not in dict_location_data:
+                    dict_location_data[loc] = data
+                
+                else:
+                    for key in dict_location_data[loc].keys():
+                        dict_location_data[loc][key] = np.concatenate( 
+                            (dict_location_data[loc][key], data[key]) )
+
+            # dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks 
+            #                 if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
+            dir_path = os.path.dirname( self.trainer.resume_from_checkpoint )  if self.trainer.resume_from_checkpoint else self.trainer.log_dir
+            # dir_path = os.path.dirname( os.path.dirname( _path  ) )
+
+            file_path = os.path.join( dir_path, "test_output.pkl" ) 
+            with open( file_path, "wb") as f:
+                pickle.dump( dict_location_data, f )
+            
+            # Recording losses on test set and summarised information about test run
+            summary = {
+                'train_start': self.dconfig.train_start,
+                'train_end':self.dconfig.train_end,
+                'val_start':self.dconfig.val_start,
+                'val_end':self.dconfig.val_end,
+                'test_start':self.dconfig.test_start,
+                'test_end':self.dconfig.test_end,
+                'test_mse':  torch.stack( [output['pred_metrics']['pred_mse'] for output in outputs], dim=0 ).mean().to('cpu').squeeze().item()  ,
+                'test_r10mse':  torch.stack( [output['pred_metrics']['pred_r10mse'] for output in outputs], dim=0 ).nanmean().to('cpu').squeeze().item()  ,
+                'test_acc': torch.stack( [output['pred_metrics']['pred_acc'] for output in outputs], dim=0 ).mean().to('cpu').squeeze().item() ,
+                'test_rec':torch.stack( [output['pred_metrics']['pred_rec'] for output in outputs], dim=0 ).mean().to('cpu').squeeze().item() ,
+            }
+
+            file_path_summary = os.path.join(dir_path, "summary.json")
+            with open(file_path_summary, "w") as f:
+                json.dump( summary, f)
 
         return super().test_epoch_end(outputs)
         
@@ -503,7 +500,6 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
     def load_scalers(cls, dir_path:str=None):
         """Loads the scaler object from a given path.
                 The path can be a path to the directory containing both the feature and target scaler
-                Alternatively, it can be two paths to the each of the feature and target.
 
         Args:
             dir_path (str, optional): [description]. Defaults to None.

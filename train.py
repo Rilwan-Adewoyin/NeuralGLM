@@ -12,40 +12,82 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 import pickle
 import pytorch_lightning as pl
 import json
-
+import os
 import torchtyping
 import argparse
 from neural_nets import MAP_NAME_NEURALMODEL
 from glms import MAP_NAME_GLM
-
+import glob
 import glm_utils
 import types
 from torch.utils.data._utils.collate import default_collate
 from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.data.datapipes.iter.utils import IterableWrapperIterDataPipe
+from typing import Dict, Any
+import yaml
+from pytorch_lightning.utilities.cloud_io import get_filesystem
+from pytorch_lightning.utilities.rank_zero import rank_zero_warn
+from pytorch_lightning.utilities import _OMEGACONF_AVAILABLE, AttributeDict
+if _OMEGACONF_AVAILABLE:
+    from omegaconf import OmegaConf
+    from omegaconf.dictconfig import DictConfig
+    from omegaconf.errors import UnsupportedValueType, ValidationError
 
+def load_hparams_from_yaml(config_yaml: str, use_omegaconf: bool = True) -> Dict[str, Any]:
+    """Load hparams from a file.
+
+        Args:
+            config_yaml: Path to config yaml file
+            use_omegaconf: If omegaconf is available and ``use_omegaconf=True``,
+                the hparams will be converted to ``DictConfig`` if possible.
+
+    >>> hparams = Namespace(batch_size=32, learning_rate=0.001, data_root='./any/path/here')
+    >>> path_yaml = './testing-hparams.yaml'
+    >>> save_hparams_to_yaml(path_yaml, hparams)
+    >>> hparams_new = load_hparams_from_yaml(path_yaml)
+    >>> vars(hparams) == hparams_new
+    True
+    >>> os.remove(path_yaml)
+    """
+    fs = get_filesystem(config_yaml)
+    if not fs.exists(config_yaml):
+        rank_zero_warn(f"Missing Tags: {config_yaml}.", category=RuntimeWarning)
+        return {}
+
+    with fs.open(config_yaml, "r") as fp:
+        hparams = yaml.unsafe_load(fp)
+
+    if _OMEGACONF_AVAILABLE:
+        if use_omegaconf:
+            try:
+                return OmegaConf.create(hparams)
+            except (UnsupportedValueType, ValidationError):
+                pass
+    return hparams
+
+
+
+pl.core.saving.load_hparams_from_yaml = load_hparams_from_yaml
 
 def train( train_args, data_args, glm_args, model_args ):
-        # Define the trainer    
-    trainer = pl.Trainer(   gpus=train_args.gpus,
-                            default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
-                            callbacks =[EarlyStopping(monitor="val_loss/loss", patience=3 if data_args.locations!=["All"] else 3 ),
-                                            ModelCheckpoint(
-                                                monitor="val_loss/loss",
-                                                filename='{epoch}-{step}-{val_loss/loss:.3f}-{val_metric/mse_rain:.3f}',
-                                                save_last=False,
-                                                auto_insert_metric_name=True,
-                                                save_top_k=1)
-                                             ] ,
-                            # limit_train_batches = 2,
-                            # limit_val_batches = 2,
-                            # limit_test_batches = 2,
-                            enable_checkpointing=True,
-                            precision=16,
-                            max_epochs=train_args.max_epochs,
-                            num_sanity_val_steps=0,
-                            # val_check_interval=1.0 if data_args.locations != ["All"] else 1.0
-                            )
+    # Define the trainer    
+    trainer = pl.Trainer(gpus=train_args.gpus,
+                        default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
+                        callbacks =[EarlyStopping(monitor="val_loss/loss", patience=2 if data_args.locations!=["All"] else 6 ),
+                                        ModelCheckpoint(
+                                            monitor="val_loss/loss",
+                                            filename='{epoch}-{step}-{val_loss/loss:.3f}-{val_metric/mse_rain:.3f}',
+                                            save_last=False,
+                                            auto_insert_metric_name=True,
+                                            save_top_k=1)
+                                            ],
+                        enable_checkpointing=True,
+                        precision=16,
+                        max_epochs=train_args.max_epochs,
+                        num_sanity_val_steps=0,
+                        # val_check_interval=train_args.val_check_interval if train_args.val_check_interval<1 else int(train_args.val_check_interval)
+                        )
+
 
     # Generate Dataset 
     if train_args.dataset == 'toy':
@@ -61,25 +103,26 @@ def train( train_args, data_args, glm_args, model_args ):
         worker=None
 
     elif train_args.dataset == "australia_rain":
+
         ds_train, ds_val, ds_test, scaler_features, scaler_target = AustraliaRainDataset.get_dataset(**vars(data_args),
-                                                                        target_distribution_name=glm_args.target_distribution_name,
-                                                                        target_range=glm_args.target_range)
+                                                        target_distribution_name=glm_args.target_distribution_name,
+                                                        target_range=glm_args.target_range)
 
         data_args.input_shape = ( len( ds_train.datasets[0].features.columns ), )
 
-        cdf = default_collate
+        cf = default_collate
         shuffle = True
         worker_init_fn=None
 
     elif train_args.dataset == "uk_rain":
+        
         ds_train, ds_val, ds_test, scaler_features, scaler_target = Era5EobsDataset.get_dataset( data_args,
                                                                         target_distribution_name=glm_args.target_distribution_name,
                                                                         target_range=glm_args.target_range,
                                                                         gen_size=data_args.gen_size,
                                                                         workers = train_args.workers,
-                                                                        trainer_dir=trainer.logger.log_dir)
+                                                                        trainer_dir=trainer.logger.log_dir )
         cf = glm_utils.default_collate_concat
-        # cf = default_collate
         shuffle = True 
         worker_init_fn=Era5EobsDataset.worker_init_fn
                
@@ -98,8 +141,8 @@ def train( train_args, data_args, glm_args, model_args ):
 
     # Create the DataLoaders
     dl_train =  DataLoader(ds_train, train_args.batch_size, shuffle=shuffle,
-                             num_workers=train_args.workers, drop_last=False,
-                              collate_fn=cf, worker_init_fn=worker_init_fn)
+                            num_workers=train_args.workers, drop_last=False,
+                            collate_fn=cf, worker_init_fn=worker_init_fn)
 
     dl_val = DataLoader(ds_val, train_args.batch_size, shuffle=False, 
                             num_workers=train_args.workers,
@@ -140,26 +183,64 @@ def train( train_args, data_args, glm_args, model_args ):
     mc = next( filter( lambda cb: isinstance(cb, ModelCheckpoint), trainer.callbacks) )
     mc._format_checkpoint_name = types.MethodType(glm_utils._format_checkpoint_name, mc)
 
-    # Save the scalers
-    glm.save_scalers( trainer.logger.log_dir, dconfig=data_args, glmconfig=glm_args )
+    if not train_args.test_version:
+        # Save the scalers
+        glm.save_scalers( trainer.logger.log_dir, dconfig=data_args, glmconfig=glm_args )
 
-    # Adding debugging to the components of loss function 
-    if train_args.debugging and glm_args.target_distribution_name=="compound_poisson":
-        glm.loss_fct.tblogger = trainer.logger.experiment
-
-
-    # Fit the Trainer
-    trainer.fit(
+        # Fit the Trainer
+        trainer.fit(
                     glm, 
                     train_dataloaders=dl_train,
                     val_dataloaders=dl_val )
-    
 
     # Test the Trainer
     trainer.test(dataloaders=dl_test, ckpt_path='best')
 
-def train_tune( train_args, data_args, glm_args, model_args ):
-    pass
+def test( train_args, data_args, glm_args ):
+
+    _dir  = os.path.join(
+        f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
+        "lightning_logs",f"version_{train_args.test_version}")
+
+    hparams_path = os.path.join( _dir, "hparams.yaml")
+    checkpoint_path = next( ( elem for elem in glob.glob(os.path.join( _dir, "checkpoints", "*")) 
+    if elem[-4:]=="ckpt"))
+    scaler_features, scaler_target = NeuralDGLM.load_scalers( os.path.join( _dir) )
+
+    #Loading state
+    glm_class = MAP_NAME_GLM[train_args.glm_name]
+    glm = glm_class.load_from_checkpoint(checkpoint_path, hparams_file=hparams_path, 
+                        scaler_features=scaler_features,
+                        scaler_target=scaler_target,
+                        save_hparams=False)
+    
+    trainer = pl.Trainer(resume_from_checkpoint=checkpoint_path, 
+                        precision=16,
+                        enable_checkpointing=False,
+                        logger=False,
+                        default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
+
+    # Making Dset
+    if train_args.dataset == "uk_rain":
+        ds_test = Era5EobsDataset.get_test_dataset( data_args,
+                                                        target_distribution_name=glm_args.target_distribution_name,
+                                                        target_range=glm_args.target_range,
+                                                        scaler_features=scaler_features,
+                                                        scaler_target=scaler_target,
+                                                        gen_size=data_args.gen_size,
+                                                        workers = train_args.workers)
+    
+        dl_test = DataLoader(ds_test, train_args.batch_size, 
+                                shuffle=False,
+                                num_workers=train_args.workers,
+                                drop_last=False, collate_fn=glm_utils.default_collate_concat, 
+                                worker_init_fn=Era5EobsDataset.worker_init_fn)
+
+    # Patching ModelCheckpoint checkpoint name creation
+
+
+    # Test the Trainer
+    trainer.test(glm, dataloaders=dl_test)
 
 if __name__ == '__main__':
 
@@ -174,14 +255,15 @@ if __name__ == '__main__':
 
     train_parser.add_argument("--nn_name", default="HLSTM", choices=["MLP","HLSTM","HLSTM_tdscale"])
     train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
-    train_parser.add_argument("--max_epochs", default=100, type=int)
-    train_parser.add_argument("--batch_size", default=32, type=int)
+    train_parser.add_argument("--max_epochs", default=500, type=int)
+    train_parser.add_argument("--batch_size", default=16, type=int)
     train_parser.add_argument("--debugging",action='store_true' )
     train_parser.add_argument("--workers",default=6, type=int )
     train_parser.add_argument("--test_version",default=None, type=int, required=False ) #TODO: implelment logic such that a trained model can just be tested on a given dataset
-
-    train_parser.add_argument("--prefetch",type=int, default=8, help="Number of batches to prefetch" )
+    train_parser.add_argument("--val_check_interval", default=1, type=float)
+    train_parser.add_argument("--prefetch",type=int, default=2, help="Number of batches to prefetch" )
     train_parser.add_argument("--hypertune",type=bool, default=False)
+    
     
 
     train_args = train_parser.parse_known_args()[0]
@@ -195,12 +277,12 @@ if __name__ == '__main__':
     # add glm specific args
     glm_args = MAP_NAME_GLM[train_args.glm_name].parse_glm_args(parent_parser)
     
-
-    if not train_args.hypertune:
+    if train_args.test_version==None:
         train(train_args, data_args, glm_args, model_args)
-    
     else:
-        train_tune(train_args, data_args, glm_args, model_args)
+        test( train_args, data_args, glm_args )
+    
+
     
 
 

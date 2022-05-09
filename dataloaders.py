@@ -1,4 +1,5 @@
 from genericpath import exists
+from re import L, M
 from tokenize import String
 from attr import has
 from netCDF4 import Dataset as nDataset
@@ -570,6 +571,7 @@ class AustraliaRainDataset(Dataset):
         parser.add_argument("--lookback", default=7, type=int )
         parser.add_argument("--locations", type= lambda _str:json.loads(_str), default=AustraliaRainDataset.valid_locations )
         parser.add_argument("--min_rain_value",type=float, default=1.0)
+        
         data_args = parser.parse_known_args()[0]
         return data_args
 
@@ -582,26 +584,8 @@ class Generator():
             rain_gen = Generator_rain(fn, all_at_once=True)
             datum = next(iter(grib_gen))
     """
-    
-    def __init__(self, fp, lookback, iter_chunk_size
-                    ,all_at_once=False, start_idx=0, end_idx=None
-                    ):
-        """Extendable Class handling the generation of model field and rain data
-            from E-Obs and ERA5 datasets
 
-        Args:
-            fp (str): Filepath of netCDF4 file containing data.
-            all_at_once (bool, optional): Whether or not to load all the data in RAM or not. Defaults to False.
-            start_idx (int, optional): Skip the first start_idx elements of the dataset
-            
-        """ 
-        assert iter_chunk_size%lookback== 0, "Iter chunk size must be a multiple of lookback\
-             to ensure that the samples we pass to the LSTM can be transformed to the correct shape"
-
-        self.generator = None
-        self.all_at_once = all_at_once
-        self.fp = fp
-        self.city_latlon = {
+    city_latlon = {
             "London": [51.5074, -0.1278],
             "Cardiff": [51.4816 + 0.15, -3.1791 -0.05], #1st Rainiest
             "Glasgow": [55.8642,  -4.2518], #3rd rainiest
@@ -627,8 +611,42 @@ class Generator():
             "Salford":[53.4875, -2.2901],
             "Aberdeen":[57.1497,-2.0943-0.05],
             "Stirling":[56.1165, -3.9369],
-            "Hull":[53.7676+0.05, 0.3274]
+            "Hull":[53.7676+0.05, 0.3274],
+            "Armagh":[54.3503, -6.66528],
+            "Bath":[51.380001,-2.360000],
+            "Brighton":[50.827778,-0.152778],
+            "Cambridge":[52.205276, 0.119167],
+            "Canterbury":[51.279999,1.080000],
+            "Chelmsford":[51.736099,0.479800],
+            "Chester":[53.189999,-2.890000],
+            "Coventry":[52.408054, -1.510556],
+            "Derby":[52.916668,-1.466667],
+            "Exeter":[50.716667,-3.533333],
+            "Perth":[56.396999, -3.437000],
+            "Sunderland":[54.906101,-1.381130],
+            "Wolverhampton":[52.591370,-2.110748],
+            "Worcester":[	52.192001,-2.220000],
+            "York":[53.958332,-1.080278],
             }
+
+    def __init__(self, fp, lookback, iter_chunk_size
+                    ,all_at_once=False, start_idx=0, end_idx=None
+                    ):
+        """Extendable Class handling the generation of model field and rain data
+            from E-Obs and ERA5 datasets
+
+        Args:
+            fp (str): Filepath of netCDF4 file containing data.
+            all_at_once (bool, optional): Whether or not to load all the data in RAM or not. Defaults to False.
+            start_idx (int, optional): Skip the first start_idx elements of the dataset
+            
+        """ 
+        assert iter_chunk_size%lookback== 0, "Iter chunk size must be a multiple of lookback\
+             to ensure that the samples we pass to the LSTM can be transformed to the correct shape"
+
+        self.generator = None
+        self.all_at_once = all_at_once
+        self.fp = fp
         
         #The longitude lattitude grid for the 0.1 degree E-obs and rainfall data
         self.latitude_array = np.linspace(58.95, 49.05, 100)
@@ -959,7 +977,7 @@ class Generator_mf(Generator):
 class Era5EobsDataset(IterableDataset):
 
     def __init__(self, dconfig, start_date, end_date, target_range,
-        locations=None, loc_count=None, scaler_features=None, 
+        locations, loc_count, scaler_features=None, 
         scaler_target=None, workers=1, shuffle=False, **kwargs ) -> None:
         super(Era5EobsDataset).__init__()
 
@@ -995,7 +1013,7 @@ class Era5EobsDataset(IterableDataset):
 
         # Query for if cache for dataset and normalizer
         query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' and \
-                                    locations == '{'_'.join([loc[:3] for loc in self.locations])}' and \
+                                    locations == '{'_'.join([loc[:2] for loc in self.locations])}' and \
                                     lookback == {str(self.dconfig.lookback_target)} and \
                                     target_range == '{','.join(map(str,target_range))}'")
         
@@ -1009,7 +1027,7 @@ class Era5EobsDataset(IterableDataset):
         else:
             os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
             self.cache_path = os.path.join( self.dconfig.data_dir, "cache",
-                f"start-{start_date}-end-{end_date}_lookbacktarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-locs-{'_'.join([loc[:3] for loc in self.locations])}")
+                f"start-{start_date}-end-{end_date}_lbtarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-locs-{'_'.join([loc[:2] for loc in self.locations])}")
             self.cache_exists = os.path.exists(self.cache_path)
         # endregion
 
@@ -1043,7 +1061,7 @@ class Era5EobsDataset(IterableDataset):
                 'cache_path':self.cache_path,
                 'start_date':start_date,
                 'end_date':end_date,
-                'locations':'_'.join([loc[:3] for loc in self.locations]),
+                'locations':'_'.join([loc[:2] for loc in self.locations]),
                 'lookback':str(self.dconfig.lookback_target),
                 'target_range':','.join(map(str,target_range),
                 )
@@ -1061,6 +1079,8 @@ class Era5EobsDataset(IterableDataset):
 
         ds_train = Era5EobsDataset( start_date = dconfig.train_start,end_date=dconfig.train_end,
                                     target_distribution_name=target_distribution_name,
+                                    locations=dconfig.locations,
+                                    loc_count=dconfig.loc_count,
                                     target_range=target_range, dconfig=dconfig, 
                                     shuffle=True,**kwargs )
         
@@ -1069,12 +1089,14 @@ class Era5EobsDataset(IterableDataset):
                                     dconfig=dconfig,
                                     target_range=target_range,
                                     target_distribution_name=target_distribution_name,
+                                    locations=dconfig.locations,
+                                    loc_count=dconfig.loc_count,
                                     scaler_features = ds_train.scaler_features,
                                     scaler_target = ds_train.scaler_target,
                                     shuffle=False,
                                     **kwargs)
 
-        assert dconfig.locations_test != ["All"], "Can not test over Whole map. please provided cities"
+        assert dconfig.locations_test != ["All"], "Can not test over Whole map. please consider using `All_Cities"
         ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
                                     locations=dconfig.locations_test, loc_count=dconfig.loc_count,
                                     dconfig=dconfig,
@@ -1086,6 +1108,22 @@ class Era5EobsDataset(IterableDataset):
                                     **kwargs)
 
         return ds_train, ds_val, ds_test, ds_train.scaler_features, ds_train.scaler_target
+    
+    @staticmethod
+    def get_test_dataset( dconfig, target_range, target_distribution_name, scaler_features, scaler_target, **kwargs):
+
+        assert dconfig.locations_test != ["All"], "Can not test over Whole map. please consider using `All_Cities"
+        ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
+                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count,
+                                    dconfig=dconfig,
+                                    target_range=target_range,
+                                    target_distribution_name=target_distribution_name,
+                                    scaler_features = scaler_features,
+                                    scaler_target = scaler_target,
+                                    shuffle=False,
+                                    **kwargs)
+
+        return  ds_test
 
     def __iter__(self):
 
@@ -1199,7 +1237,7 @@ class Era5EobsDataset(IterableDataset):
                                 }
                             }
                                            
-                    if not os.path.exists(self.cache_path):
+                    if idx==0 or os.path.exists(self.cache_path):
                         
                         coords = {
                             "sample_idx": np.arange( torch.concat(dict_data['input']).shape[0] ),
@@ -1232,14 +1270,11 @@ class Era5EobsDataset(IterableDataset):
                             "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] ),
 
                             "d": np.arange( dict_data['input'][0].shape[-1]),
-
                         }
+
                         xr_new = xr.Dataset( **kwargs)
                         xr_curr = xr.concat( [ xr_curr, xr_new], dim="sample_idx", join="exact" )
-                        # comp = dict(zlib=True, complevel=5)
-                        # encoding = {var: comp for var in xr_curr.data_vars}
-                        # xr_curr.to_netcdf(self.cache_path, mode='w', encoding=encoding )
-                        # xr_curr.to_netcdf(self.cache_path, mode='w', )
+
                 
                 if bool_update_scaler_features: 
                     # reshaping feature into ( num, dims) dimension required by partial_fit
@@ -1285,22 +1320,24 @@ class Era5EobsDataset(IterableDataset):
         for loc in self.locations:
             loc_dict = { }
 
+            location_data = [ dict_ for dict_ in li_dicts if dict_["li_locations"]==loc ]
+            if len(location_data) ==0: 
+                continue
+
             for key in keys:
                 
                 #Concat all elements for each variable
                 if isinstance( li_dicts[0][key], torch.Tensor ):
                     
-                    
                     if key in ["input","idx_loc_in_region"]:
                         s = li_dicts[0][key].shape[-1] 
-                        key_data = torch.cat( [ dict_[key] for dict_ in li_dicts if dict_["li_locations"]==loc ], dim=0 ).reshape(-1, s)
+                        key_data = torch.cat( [_dict[key] for _dict in location_data], dim=0 ).reshape(-1, s)
                     
                     elif key in ['target','mask']:
-                        
-                        key_data = torch.cat( [ dict_[key] for dict_ in li_dicts if dict_["li_locations"]==loc ], dim=0 ).reshape( -1 )
+                        key_data = torch.cat( [_dict[key] for _dict in location_data ], dim=0 ).reshape( -1 )
 
                 else:
-                    key_data = [ dict_[key] for dict_ in li_dicts if dict_["li_locations"]==loc ] 
+                    key_data = [_dict[key] for _dict in location_data]
                                 
                 loc_dict[key] = key_data
                     
@@ -1308,7 +1345,7 @@ class Era5EobsDataset(IterableDataset):
         
         # rebatching into weeks with increment
         
-        for loc in self.locations:
+        for loc in dict_loc_unbundled.keys():
             dict_loc_batched[loc] = {}
             # incrementing and batching
             for key in keys:
@@ -1338,7 +1375,7 @@ class Era5EobsDataset(IterableDataset):
                     l = len(d)-self.dconfig.lookback_feature
                     dict_loc_batched[loc][key] = [ d[idx:idx+self.dconfig.lookback_feature].unsqueeze(0) for idx in range(0, l, self.dconfig.lookback_feature) ]
 
-        count = sum( len( dict_loc_batched[loc][keys[0]] ) for loc in self.locations )
+        count = sum( len( dict_loc_batched[loc][keys[0]] ) for loc in dict_loc_batched.keys() )
         li_dicts_shuffled = [ defaultdict(dict) for i in range(count) ]
         
         # Creating original list of dicts structure
@@ -1346,13 +1383,13 @@ class Era5EobsDataset(IterableDataset):
             
             # if key in ['target','mask','idx_loc_in_region']:
             if key in ['target','mask']:
-                li_datums = sum( [ dict_loc_batched[loc][key] for loc in self.locations ], [] )
+                li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
             elif key in ['input']:
-                li_datums = sum( [ dict_loc_batched[loc][key] for loc in self.locations ], [] )
+                li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
             elif key in ['idx_loc_in_region']:
-                li_datums = sum( [ dict_loc_batched[loc][key] for loc in self.locations ], [] )
+                li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
             elif key == ['li_locations']:
-                li_datums = sum( [ dict_loc_batched[loc][key] for loc in self.locations ], [] )
+                li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
 
             for idx in range(count):
                 li_dicts_shuffled[idx][key] = li_datums[idx]
@@ -1503,7 +1540,10 @@ class Era5EobsDataset(IterableDataset):
         if not hasattr(self,'cache_start_idx'):
             self.cache_start_idx = 0
         if not hasattr(self,'cache_end_idx'):
-            self.cache_end_idx = 0 + int(((self.max_cache_len - self.cache_start_idx)//self.dconfig.lookback_target)*self.dconfig.lookback_target )
+            if self.shuffle:
+                self.cache_end_idx = 0 + int(((self.max_cache_len - self.cache_start_idx)//self.dconfig.lookback_target)*self.dconfig.lookback_target )
+            else:
+                self.cache_end_idx = 0 + self.max_cache_len
         if not hasattr(self,'cache_len'):
             self.cache_len = self.cache_end_idx + 1 - self.cache_start_idx
 
@@ -1562,21 +1602,22 @@ class Era5EobsDataset(IterableDataset):
         parser.add_argument("--lookback_target", type=int, default=7)
         # parser.add_argument("--target_range", nargs='+', default=[0,4])
 
-        parser.add_argument("--train_start", type=str, default="1979" )
-        parser.add_argument("--train_end", type=str, default="2009" )
+        parser.add_argument("--train_start", type=str, default="1979")
+        parser.add_argument("--train_end", type=str, default="2009")
 
-        parser.add_argument("--val_start", type=str, default="2009" )
-        parser.add_argument("--val_end", type=str, default="2014" )
+        parser.add_argument("--val_start", type=str, default="2009")
+        parser.add_argument("--val_end", type=str, default="2014")
 
-        parser.add_argument("--test_start", type=str, default="2014" )
-        parser.add_argument("--test_end", type=str, default="2019-07" )
+        parser.add_argument("--test_start", type=str, default="2014")
+        parser.add_argument("--test_end", type=str, default="2019-07")
 
         parser.add_argument("--min_rain_value", type=float, default=0.5)
-        parser.add_argument("--gen_size", type=int, default=4, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--gen_size", type=int, default=60, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
 
 
         dconfig = parser.parse_known_args()[0]
         dconfig.locations = sorted(dconfig.locations)
+        dconfig.locations = sorted(dconfig.locations_test)
         dconfig = Era5EobsDataset.add_fixed_args(dconfig)
 
         return dconfig
@@ -1634,6 +1675,12 @@ class Era5EobsDataset(IterableDataset):
         dconfig.test_set_size_elements = ( np.timedelta64(test_end_date - test_start_date,'D')  // dconfig.window_shift  ).astype(int)               
         dconfig.test_set_size_elements *= loc_count_test
         
+        if dconfig.locations[0] == "All_Cities":
+            dconfig.locations = sorted( list( Generator.city_latlon.keys() ) )
+
+        if dconfig.locations_test[0] == "All_Cities":
+            dconfig.locations_test = sorted( list( Generator.city_latlon.keys() ) )
+
         return dconfig
 
     @staticmethod
@@ -1684,6 +1731,7 @@ class Era5EobsDataset(IterableDataset):
         tensor = torch.where(mask, tensor, mask_val)
 
         return tensor
+
 
 # endrefion 
 
