@@ -16,7 +16,6 @@ import torch
 import numpy as np
 from torch import Tensor
 
-LIST_PVar_Model = ["lognormal_hurdle","gamma_hurdle","compound_poisson"] #List of models that use the p variable
 
 # Distributions
 class LogNormalHurdle():

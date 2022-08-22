@@ -11,6 +11,9 @@ RelevantPapers/*
 
 # Large Data folders
 Checkpoints/*
+Checkpoints_all/*
+Checkpoints_all_cities/*
+*zip
 
 #Shell scripts
 *.sh

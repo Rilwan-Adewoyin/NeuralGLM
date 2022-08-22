@@ -1,17 +1,16 @@
 from dataloaders import ToyDataset, AustraliaRainDataset,Era5EobsDataset, MAP_NAME_DSET
-from distributions import LIST_PVar_Model
 import torch
 from torch.nn import functional as F
 from torch import nn
 import numpy as np
-from argparse import ArgumentParser
+from argparse import ArgumentParser 
 from glms import NeuralDGLM
 from torch.utils.data import DataLoader
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
-import pickle
+
 import pytorch_lightning as pl
-import json
+
 import os
 import torchtyping
 import argparse
@@ -23,6 +22,7 @@ import types
 from torch.utils.data._utils.collate import default_collate
 from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.data.datapipes.iter.utils import IterableWrapperIterDataPipe
+from pytorch_lightning.profiler import AdvancedProfiler
 from typing import Dict, Any
 import yaml
 from pytorch_lightning.utilities.cloud_io import get_filesystem
@@ -65,15 +65,13 @@ def load_hparams_from_yaml(config_yaml: str, use_omegaconf: bool = True) -> Dict
                 pass
     return hparams
 
-
-
 pl.core.saving.load_hparams_from_yaml = load_hparams_from_yaml
 
 def train( train_args, data_args, glm_args, model_args ):
     # Define the trainer    
     trainer = pl.Trainer(gpus=train_args.gpus,
                         default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
-                        callbacks =[EarlyStopping(monitor="val_loss/loss", patience=2 if data_args.locations!=["All"] else 6 ),
+                        callbacks =[EarlyStopping(monitor="val_loss/loss", patience=7 if data_args.locations!=["All"] else 8 ),
                                         ModelCheckpoint(
                                             monitor="val_loss/loss",
                                             filename='{epoch}-{step}-{val_loss/loss:.3f}-{val_metric/mse_rain:.3f}',
@@ -85,9 +83,15 @@ def train( train_args, data_args, glm_args, model_args ):
                         precision=16,
                         max_epochs=train_args.max_epochs,
                         num_sanity_val_steps=0,
-                        # val_check_interval=train_args.val_check_interval if train_args.val_check_interval<1 else int(train_args.val_check_interval)
+                        limit_train_batches=20 if train_args.debugging else None,
+                        limit_val_batches=5 if train_args.debugging else None,
+                        limit_test_batches=5 if train_args.debugging else None,
+                        val_check_interval=None if train_args.debugging else ( train_args.val_check_interval if train_args.val_check_interval<=1 else int(train_args.val_check_interval) ),
+                        # profiler = AdvancedProfiler(
+                        #     f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
+                        #     "profile.txt") if train_args.debugging else None,
+                        
                         )
-
 
     # Generate Dataset 
     if train_args.dataset == 'toy':
@@ -123,36 +127,48 @@ def train( train_args, data_args, glm_args, model_args ):
                                                                         workers = train_args.workers,
                                                                         trainer_dir=trainer.logger.log_dir )
         cf = glm_utils.default_collate_concat
-        shuffle = True 
         worker_init_fn=Era5EobsDataset.worker_init_fn
                
         # Needs to be true for suffling
         assert ds_train.rain_data.data_len_per_location/ds_train.rain_data.lookback == ds_train.mf_data.data_len_per_location/ds_train.mf_data.lookback, "Per location Length of target and feature do not match {ds_train.rain_data.data_data_len_per_locationlen}-{ds_train.mf_data.data_len_per_location}"
         
             # Shuffling Datasetes
-        ds_train_iter = IterableWrapperIterDataPipe(ds_train)
-        ds_train = ShufflerIterDataPipe(ds_train_iter, 
+
+        if data_args.shuffle:
+            buffer_size = ds_train.loc_count*(4*12) 
+            buffer_size = buffer_size if not train_args.debugging else 5
+            ds_train_iter = IterableWrapperIterDataPipe(ds_train, deepcopy=False)
+
+            ds_train = ShufflerIterDataPipe(ds_train_iter, 
                             #HERE adjust data length to factor in other locations ont just 1
-                            buffer_size=ds_train.loc_count*(4*12) if not train_args.debugging else 20, #Each datum represents 7 days long
+                            buffer_size=buffer_size, #Each datum represents 7 days long
                             unbatch_level=0)
 
     else:
         raise NotImplementedError
 
-    # Create the DataLoaders
-    dl_train =  DataLoader(ds_train, train_args.batch_size, shuffle=shuffle,
+    # Create the DataLoaders    
+    dl_train =  DataLoader(ds_train, train_args.batch_size, shuffle=data_args.shuffle,
                             num_workers=train_args.workers, drop_last=False,
-                            collate_fn=cf, worker_init_fn=worker_init_fn)
+                            pin_memory=True,
+                            collate_fn=cf, 
+                            worker_init_fn=worker_init_fn,
+                            prefetch_factor=train_args.prefetch,
+                            persistent_workers=True )
 
     dl_val = DataLoader(ds_val, train_args.batch_size, shuffle=False, 
                             num_workers=train_args.workers,
                             drop_last=False, collate_fn=cf,
-                            worker_init_fn=worker_init_fn)
+                            pin_memory=True,
+                            worker_init_fn=worker_init_fn,
+                            prefetch_factor=train_args.prefetch,
+                            persistent_workers=True)
 
     dl_test = DataLoader(ds_test, train_args.batch_size, 
                             shuffle=False,
                             num_workers=train_args.workers,
                             drop_last=False, collate_fn=cf, 
+                            pin_memory=True,
                             worker_init_fn=worker_init_fn)
     
 
@@ -161,7 +177,7 @@ def train( train_args, data_args, glm_args, model_args ):
     nn_params = { **vars(model_args),
                     **dict( input_shape = data_args.input_shape,
                             output_shape = data_args.output_shape,
-                            p_variable_model = glm_args.target_distribution_name in LIST_PVar_Model)}
+                            )}
                     
     if train_args.dataset == "uk_rain":
         nn_params['lookback'] = data_args.lookback_target
@@ -177,8 +193,6 @@ def train( train_args, data_args, glm_args, model_args ):
                         debugging=train_args.debugging,
                         dconfig= data_args)
 
-
-
     # Patching ModelCheckpoint checkpoint name creation
     mc = next( filter( lambda cb: isinstance(cb, ModelCheckpoint), trainer.callbacks) )
     mc._format_checkpoint_name = types.MethodType(glm_utils._format_checkpoint_name, mc)
@@ -188,10 +202,15 @@ def train( train_args, data_args, glm_args, model_args ):
         glm.save_scalers( trainer.logger.log_dir, dconfig=data_args, glmconfig=glm_args )
 
         # Fit the Trainer
-        trainer.fit(
-                    glm, 
-                    train_dataloaders=dl_train,
-                    val_dataloaders=dl_val )
+        try:
+            trainer.fit(
+                        glm, 
+                        train_dataloaders=dl_train,
+                        val_dataloaders=dl_val
+                         )
+        except RuntimeError as e:
+            print("e")
+            raise e
 
     # Test the Trainer
     trainer.test(dataloaders=dl_test, ckpt_path='best')
@@ -204,7 +223,7 @@ def test( train_args, data_args, glm_args ):
 
     hparams_path = os.path.join( _dir, "hparams.yaml")
     checkpoint_path = next( ( elem for elem in glob.glob(os.path.join( _dir, "checkpoints", "*")) 
-    if elem[-4:]=="ckpt"))
+                                if elem[-4:]=="ckpt"))
     scaler_features, scaler_target = NeuralDGLM.load_scalers( os.path.join( _dir) )
 
     #Loading state
@@ -216,19 +235,20 @@ def test( train_args, data_args, glm_args ):
     
     trainer = pl.Trainer(resume_from_checkpoint=checkpoint_path, 
                         precision=16,
-                        enable_checkpointing=False,
+                        enable_checkpointing=not train_args.debugging,
                         logger=False,
+                        gpus=train_args.gpus,
                         default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
 
     # Making Dset
     if train_args.dataset == "uk_rain":
         ds_test = Era5EobsDataset.get_test_dataset( data_args,
-                                                        target_distribution_name=glm_args.target_distribution_name,
-                                                        target_range=glm_args.target_range,
-                                                        scaler_features=scaler_features,
-                                                        scaler_target=scaler_target,
-                                                        gen_size=data_args.gen_size,
-                                                        workers = train_args.workers)
+                                                    target_distribution_name=glm_args.target_distribution_name,
+                                                    target_range=glm_args.target_range,
+                                                    scaler_features=scaler_features,
+                                                    scaler_target=scaler_target,
+                                                    gen_size=data_args.gen_size,
+                                                    workers = train_args.workers)
     
         dl_test = DataLoader(ds_test, train_args.batch_size, 
                                 shuffle=False,
@@ -253,19 +273,17 @@ if __name__ == '__main__':
     train_parser.add_argument("--sample_size", default=1000)
     train_parser.add_argument("--dataset", default="australia_rain", choices=["toy","australia_rain","uk_rain"])
 
-    train_parser.add_argument("--nn_name", default="HLSTM", choices=["MLP","HLSTM","HLSTM_tdscale"])
+    train_parser.add_argument("--nn_name", default="HLSTM", choices=["MLP","HLSTM","HLSTM_tdscale", "HConvLSTM_tdscale"])
     train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
     train_parser.add_argument("--max_epochs", default=500, type=int)
     train_parser.add_argument("--batch_size", default=16, type=int)
     train_parser.add_argument("--debugging",action='store_true' )
-    train_parser.add_argument("--workers",default=6, type=int )
+    train_parser.add_argument("--workers",default=8, type=int )
     train_parser.add_argument("--test_version",default=None, type=int, required=False ) #TODO: implelment logic such that a trained model can just be tested on a given dataset
-    train_parser.add_argument("--val_check_interval", default=1, type=float)
-    train_parser.add_argument("--prefetch",type=int, default=2, help="Number of batches to prefetch" )
+    train_parser.add_argument("--val_check_interval", default=1.0, type=float)
+    train_parser.add_argument("--prefetch",type=int, default=4, help="Number of batches to prefetch" )
     train_parser.add_argument("--hypertune",type=bool, default=False)
     
-    
-
     train_args = train_parser.parse_known_args()[0]
     
     # add model specific args
