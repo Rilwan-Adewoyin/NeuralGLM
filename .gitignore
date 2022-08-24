@@ -16,7 +16,7 @@ Checkpoints_all_cities/*
 *zip
 
 #Shell scripts
-*.sh
+# *.sh
 
 # Jupyter
 *.ipynb*

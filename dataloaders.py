@@ -1145,7 +1145,7 @@ class Era5EobsDataset(IterableDataset):
 
         # assert dconfig.locations_test != ["All"], "Can not test over Whole map. please consider using `All_Cities"
         ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
-                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count,
+                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count_test,
                                     dconfig=dconfig,
                                     target_range=target_range,
                                     target_distribution_name=target_distribution_name,
@@ -1724,10 +1724,18 @@ class Era5EobsDataset(IterableDataset):
         test_start_date = np.datetime64(dconfig.test_start,'D')
         test_end_date = (pd.Timestamp(dconfig.test_end) - pd.DateOffset(seconds=1) ).to_numpy()
 
+        # Handling case of "All cities" for location
+        if dconfig.locations[0] == "All_Cities":
+            dconfig.locations = sorted( list( Generator.city_latlon.keys() ) )
+
+        if dconfig.locations_test[0] == "All_Cities":
+            dconfig.locations_test = sorted( list( Generator.city_latlon.keys() ) )
+
+        # Handling case of "All" for location
         loc_count = len(dconfig.locations)  if \
                     dconfig.locations != ["All"] else \
                     len( Generator.get_locs_for_whole_map(dconfig))
-
+        
         loc_count_test = loc_count \
                             if not dconfig.locations_test \
                             else (
@@ -1748,13 +1756,6 @@ class Era5EobsDataset(IterableDataset):
         dconfig.test_set_size_elements = ( np.timedelta64(test_end_date - test_start_date,'D')  // dconfig.window_shift  ).astype(int)               
         dconfig.test_set_size_elements *= loc_count_test
         
-        if dconfig.locations[0] == "All_Cities":
-            dconfig.locations = sorted( list( Generator.city_latlon.keys() ) )
-
-        if dconfig.locations_test[0] == "All_Cities":
-            dconfig.locations_test = sorted( list( Generator.city_latlon.keys() ) )
-        
-
         return dconfig
 
     @staticmethod

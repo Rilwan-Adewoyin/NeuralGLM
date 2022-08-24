@@ -85,12 +85,8 @@ def train( train_args, data_args, glm_args, model_args ):
                         num_sanity_val_steps=0,
                         limit_train_batches=20 if train_args.debugging else None,
                         limit_val_batches=5 if train_args.debugging else None,
-                        limit_test_batches=5 if train_args.debugging else None,
-                        val_check_interval=None if train_args.debugging else ( train_args.val_check_interval if train_args.val_check_interval<=1 else int(train_args.val_check_interval) ),
-                        # profiler = AdvancedProfiler(
-                        #     f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
-                        #     "profile.txt") if train_args.debugging else None,
-                        
+                        # limit_test_batches=5 if train_args.debugging else None,
+                        val_check_interval=None if train_args.debugging else ( train_args.val_check_interval if train_args.val_check_interval<=1 else int(train_args.val_check_interval) ),                        
                         )
 
     # Generate Dataset 
