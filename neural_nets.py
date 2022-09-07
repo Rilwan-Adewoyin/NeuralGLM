@@ -20,6 +20,7 @@ import argparse
 from torch.nn import Parameter
 import math
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
+#python3 -m pip install git+https://github.com/Rilwan-A/Better_LSTM_PyTorch.git
 
 class HLSTM(nn.Module):
     

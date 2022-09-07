@@ -1,4 +1,5 @@
 from genericpath import exists
+from pydoc import apropos
 from re import L, M
 from tokenize import String
 from attr import has
@@ -35,6 +36,9 @@ import random
 from collections import defaultdict
 from glm_utils import tuple_type
 from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper
+from frozendict import frozendict
+from collections.abc import Collection, Mapping, Hashable
+import functools
 """
     dataloaders.py provides functionality for loading in the following Datasets:
 
@@ -51,8 +55,31 @@ from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrappe
     
 """
 
+#classes that allow caching on dictionary
+
+def deep_freeze(thing):
+    if thing is None or isinstance(thing, str):
+        return thing
+    elif isinstance(thing, argparse.Namespace):
+        return frozendict({k: deep_freeze(v) for k, v in vars(thing).items()})
+    elif isinstance(thing, Mapping):
+        return frozendict({k: deep_freeze(v) for k, v in thing.items()})
+    elif isinstance(thing, Collection):
+        return tuple(deep_freeze(i) for i in thing)
+    elif not isinstance(thing, Hashable):
+        raise TypeError(f"unfreezable type: '{type(thing)}'")
+    else:
+        return thing
 
 
+def deep_freeze_args(func):
+    
+    @functools.wraps(func)
+    def wrapped(*args, **kwargs):
+        return func(*deep_freeze(args), **deep_freeze(kwargs))
+    return wrapped
+
+# -- Toy Dataset
 class ToyDataset(Dataset):
     """
         ToyDataset:
@@ -690,6 +717,10 @@ class Generator():
             94:list(range(0,40+1)), 95:list(range(0,40+1)), 96:list(range(0,40+1)), 97:list(range(0,40+1)), 98:list(range(0,40+1)), 99:list(range(0,40+1)), 100:list(range(0,40+1))
 
         }
+    
+    #The longitude lattitude grid for the 0.1 degree E-obs and rainfall data
+    latitude_array = np.linspace(58.95, 49.05, 100)
+    longitude_array = np.linspace(-10.95, 2.95, 140)
 
     def __init__(self, fp, lookback, iter_chunk_size
                     ,all_at_once=False, start_idx=0, end_idx=None
@@ -712,9 +743,7 @@ class Generator():
         self.all_at_once = all_at_once
         self.fp = fp
         
-        #The longitude lattitude grid for the 0.1 degree E-obs and rainfall data
-        self.latitude_array = np.linspace(58.95, 49.05, 100)
-        self.longitude_array = np.linspace(-10.95, 2.95, 140)
+
         
         # Retrieving information on temporal length of  dataset        
         with nDataset(self.fp, "r+", format="NETCDF4") as ds:
@@ -746,7 +775,6 @@ class Generator():
         else:
             return self.yield_iter()
     
-    @lru_cache()
     def find_idxs_of_loc(self, loc="London"):
         """Returns the grid indexes on the 2D map of the UK which correspond to the location (loc) point
 
@@ -822,7 +850,10 @@ class Generator():
         longitude_index =   np.abs(self.longitude_array - lat_lon[1]).argmin()
 
         return (latitude_index, longitude_index)
-        
+    
+    @staticmethod
+    @deep_freeze_args
+    @lru_cache    
     def get_locs_for_whole_map(dconfig):
         """This function returns a list of boundaries which can be used to extract all patches
             from the 2D map. 
@@ -836,7 +867,7 @@ class Generator():
                         of the form [ ([upper_h, lower_h]. [left_w, right_w]), ... ]
             If we do have a stride then shuffle changes which set of points we pick at each round of iteration
         """      
-
+        dconfig = argparse.Namespace(**dconfig)
         original_uk_dim = dconfig.original_uk_dim
         h_shift = dconfig.vertical_shift
         w_shift = dconfig.horizontal_shift
@@ -860,19 +891,22 @@ class Generator():
 
         return filtered_boundaries
     
-    def get_locs_latlon_for_whole_map(self, dconfig):
-
+    @staticmethod
+    @deep_freeze_args
+    @lru_cache
+    def get_locs_latlon_for_whole_map(dconfig):
+        dconfig = argparse.Namespace(**dconfig)
         filtered_boundaries = Generator.get_locs_for_whole_map(dconfig)
 
         filtered_latlon = [
             ( 
                 [
-                    self.hidx_to_lat(hpair_wpair[0][0]),
-                    self.hidx_to_lat(hpair_wpair[0][1])
+                    Generator.hidx_to_lat(hpair_wpair[0][0]),
+                    Generator.hidx_to_lat(hpair_wpair[0][1])
                 ],
                 [
-                    self.widx_to_lon(hpair_wpair[1][0]),
-                    self.widx_to_lon(hpair_wpair[1][1])
+                    Generator.widx_to_lon(hpair_wpair[1][0]),
+                    Generator.widx_to_lon(hpair_wpair[1][1])
                 ]
             )
             for hpair_wpair in filtered_boundaries
@@ -880,16 +914,17 @@ class Generator():
 
         return filtered_latlon
     
-    def hidx_to_lat(self, hidx):
-        return self.latitude_array[hidx]
-
-    def widx_to_lon(self, widx):
-        return self.longitude_array[widx]
+    @staticmethod
+    def hidx_to_lat(hidx):
+        return Generator.latitude_array[hidx]
+    @staticmethod
+    def widx_to_lon(widx):
+        return Generator.longitude_array[widx]
 
         
 
 
-    
+    @staticmethod
     def get_filtered_boundaries(li_boundaries ):
 
         filtered_boundaries = []
@@ -1145,7 +1180,7 @@ class Era5EobsDataset(IterableDataset):
 
         # assert dconfig.locations_test != ["All"], "Can not test over Whole map. please consider using `All_Cities"
         ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
-                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count_test,
+                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count,
                                     dconfig=dconfig,
                                     target_range=target_range,
                                     target_distribution_name=target_distribution_name,
@@ -1522,7 +1557,7 @@ class Era5EobsDataset(IterableDataset):
         if locations == ["All"]:
             li_hw_idxs = Generator.get_locs_for_whole_map( self.dconfig ) #[ ([upper_h, lower_h]. [left_w, right_w]), ... ]
             
-            locs_latlon_for_whole_map = self.rain_data.get_locs_latlon_for_whole_map(self.dconfig) #[ ([lat1, lat2]. [lon1, lon2]), ... ]
+            locs_latlon_for_whole_map = Generator.get_locs_latlon_for_whole_map(self.dconfig) #[ ([lat1, lat2]. [lon1, lon2]), ... ]
 
             #Convert to string format
             locs_latlon_for_whole_map = [  
@@ -1724,18 +1759,10 @@ class Era5EobsDataset(IterableDataset):
         test_start_date = np.datetime64(dconfig.test_start,'D')
         test_end_date = (pd.Timestamp(dconfig.test_end) - pd.DateOffset(seconds=1) ).to_numpy()
 
-        # Handling case of "All cities" for location
-        if dconfig.locations[0] == "All_Cities":
-            dconfig.locations = sorted( list( Generator.city_latlon.keys() ) )
-
-        if dconfig.locations_test[0] == "All_Cities":
-            dconfig.locations_test = sorted( list( Generator.city_latlon.keys() ) )
-
-        # Handling case of "All" for location
         loc_count = len(dconfig.locations)  if \
                     dconfig.locations != ["All"] else \
                     len( Generator.get_locs_for_whole_map(dconfig))
-        
+
         loc_count_test = loc_count \
                             if not dconfig.locations_test \
                             else (
@@ -1756,6 +1783,13 @@ class Era5EobsDataset(IterableDataset):
         dconfig.test_set_size_elements = ( np.timedelta64(test_end_date - test_start_date,'D')  // dconfig.window_shift  ).astype(int)               
         dconfig.test_set_size_elements *= loc_count_test
         
+        if dconfig.locations[0] == "All_Cities":
+            dconfig.locations = sorted( list( Generator.city_latlon.keys() ) )
+
+        if dconfig.locations_test[0] == "All_Cities":
+            dconfig.locations_test = sorted( list( Generator.city_latlon.keys() ) )
+        
+
         return dconfig
 
     @staticmethod

@@ -204,9 +204,6 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             mask    = Era5EobsDataset.extract_central_region(mask, bounds )
             target_did_rain = Era5EobsDataset.extract_central_region(target_did_rain, bounds )
             target_rain_value_scaled  = Era5EobsDataset.extract_central_region(target_rain_value_scaled, bounds )
-            # Adjusting location of centre - assumes the bounds were symetrical around the centre 
-            idx_loc_in_region[:, :1 ] = (bounds[1]-bounds[0] )/2
-            idx_loc_in_region[:, 1: ] = (bounds[3]-bounds[2] )/2
 
             # Patch/Pixel masking loss 
             pixel_mask = True #Defaults to True
@@ -265,8 +262,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                                                         pred_p_scaled.detach(), self.scaler_target )
             target_rain_value = self.unscale_rain(target_rain_value_scaled, self.scaler_target)
 
-            output =  {'loss':loss, 'pred_mu':pred_mu.detach().to('cpu'), 
-                        'pred_disp':pred_disp.detach().to('cpu'),  
+            output =  {'loss':loss, 'pred_mu':pred_mu.detach().to('cpu'), 'pred_disp':pred_disp.detach().to('cpu'),  
                         'pred_p':pred_p.detach().to('cpu'),
                             'target_did_rain':target_did_rain.detach().to('cpu'),
                             'target_rain_value':target_rain_value.detach().to('cpu'), 
@@ -274,8 +270,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                             'pred_metrics':pred_metrics,
                             'composite_losses':composite_losses,
                             'mask':mask,
-                            'idx_loc_in_region':idx_loc_in_region.detach().to('cpu') if self.task =="uk_rain" else None,
-                            'li_locations': batch['li_locations']
+                            'idx_loc_in_region':idx_loc_in_region.detach().to('cpu') if self.task =="uk_rain" else None
 
                             }
                 
@@ -437,13 +432,9 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                 # Need to concat data for each city
                 s_idx_adj = s_idx
                 e_idx_adj = e_idx
-                try:
-                    datum_start_date = dconfig.test_start if (loc not in dict_location_data) else ( dict_location_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
-                except TypeError as e:
-                    loc = str(loc[0])
-                    datum_start_date = dconfig.test_start if (loc not in dict_location_data) else ( dict_location_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
-                
-                date_windows = pd.date_range( start=datum_start_date, periods=(e_idx_adj-s_idx_adj), freq='7D', normalize=True  )
+
+                datum_start_date = dconfig.test_start if (loc not in dict_location_data) else ( dict_location_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
+                date_windows = pd.date_range( start=datum_start_date, periods=(e_idx_adj-s_idx_adj), freq='D', normalize=True  )
 
                 data = {'pred_mu':pred_mu[s_idx_adj:e_idx_adj],
                         'pred_disp':pred_disp[s_idx_adj:e_idx_adj],
@@ -451,10 +442,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                         'target_rain_value':target_rain_value[s_idx_adj:e_idx_adj],
                         'date':np.asarray( date_windows ),
                         'pred_p': pred_p[s_idx_adj:e_idx_adj],
-                        'idx_loc_in_region': idx_loc_in_region[s_idx_adj:e_idx_adj],
-                        
-                        # 'locations': np.asarray(locations[s_idx_adj:e_idx_adj])
-                         }
+                        'idx_loc_in_region': idx_loc_in_region[s_idx_adj:e_idx_adj] }
                 
                 if loc not in dict_location_data:
                     dict_location_data[loc] = data
