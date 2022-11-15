@@ -1,3 +1,4 @@
+from audioop import add
 from genericpath import exists
 from pydoc import apropos
 from re import L, M
@@ -39,6 +40,7 @@ from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrappe
 from frozendict import frozendict
 from collections.abc import Collection, Mapping, Hashable
 import functools
+from itertools import product
 """
     dataloaders.py provides functionality for loading in the following Datasets:
 
@@ -659,65 +661,102 @@ class Generator():
             "Worcester":[	52.192001,-2.220000],
             "York":[53.958332,-1.080278],
             }
-
         # The list of boundaries to remove assumes that we are using a 16by16 outer grid with a 4by4 inner grid
     
-    invalid_points = {
-            0:list(range(0,48+1))+list(range(64,140+1)), 1:list(range(0,48+1))+list(range(64,140+1)), 2:list(range(0,48+1))+list(range(64,140+1)), 3:list(range(0,48+1))+list(range(64,140+1)), 4:list(range(0,48+1))+list(range(64,140+1)), 5:list(range(0,48+1))+list(range(64,140+1)), 
+    invalid_points = { #latitude is the keys, longitude is the values
+            #0:9: (0-48)(64-100)
+            0:list(range(0,48))+list(range(64,140)), 1:list(range(0,48))+list(range(64,140)), 2:list(range(0,48))+list(range(64,140)), 3:list(range(0,48))+list(range(64,140)), 4:list(range(0,48))+list(range(64,140)), 5:list(range(0,48))+list(range(64,140)), 
+            6:list(range(0,48))+list(range(64,140)), 7:list(range(0,48))+list(range(64,140)), 8:list(range(0,48))+list(range(64,140)), 9:list(range(0,48))+list(range(64,140)),
+
             
-            #6-9
-            6:list(range(0,48+1))+list(range(64,140+1)), 7:list(range(0,48+1))+list(range(64,140+1)), 8:list(range(0,48+1))+list(range(64,140+1)), 9:list(range(0,48+1))+list(range(64,140+1)),
+            10: list(range(0,48))+list(range(96,140)), 
+            
+            #11-13: (0,48)(76-140)
+            11: list(range(0,48))+list(range(76,140)), 12 :list(range(0,48))+list(range(76,140)), 13 :list(range(0,48))+list(range(76,140)),
 
-            #10-13
-            10: list(range(0,48+1))+list(range(96,140+1)), 11: list(range(0,48+1))+list(range(76,140+1)), 12 :list(range(0,48+1))+list(range(76,140+1)), 13 :list(range(0,48+1))+list(range(76,140+1)),
-
-            #14-17
-            14:list(range(0,48+1))+list(range(96,140+1)), 15:list(range(0,48+1))+list(range(96,140+1)), 16:list(range(0,48+1))+list(range(96,140+1)), 17:list(range(0,48+1))+list(range(96,140+1)),
-
-            #18-21
-            18:list(range(0,48+1))+list(range(96,140+1)), 19:list(range(0,48+1))+list(range(96,140+1)), 20:list(range(0,48+1))+list(range(96,140+1)), 21:list(range(0,48+1))+list(range(96,140+1)),
-
-            #22-25
-            22:list(range(0,48+1))+list(range(96,140+1)), 23:list(range(0,48+1))+list(range(96,140+1)), 24:list(range(0,48+1))+list(range(96,140+1)), 25:list(range(0,48+1))+list(range(96,140+1)),
-
-            #26-29
-            26:list(range(0,48+1))+list(range(96,140+1)), 27:list(range(0,48+1))+list(range(96,140+1)), 28:list(range(0,48+1))+list(range(96,140+1)), 29:list(range(0,48+1))+list(range(96,140+1)),
+            #14-17: (0-48)(96,140)
+            14:list(range(0,48))+list(range(96,140)), 15:list(range(0,48))+list(range(96,140)), 16:list(range(0,48))+list(range(96,140)), 17:list(range(0,48))+list(range(96,140)),
+            18:list(range(0,48))+list(range(96,140)), 19:list(range(0,48))+list(range(96,140)), 20:list(range(0,48))+list(range(96,140)), 21:list(range(0,48))+list(range(96,140)),
+            22:list(range(0,48))+list(range(96,140)), 23:list(range(0,48))+list(range(96,140)), 24:list(range(0,48))+list(range(96,140)), 25:list(range(0,48))+list(range(96,140)),
+            26:list(range(0,48))+list(range(96,140)), 27:list(range(0,48))+list(range(96,140)), 28:list(range(0,48))+list(range(96,140)), 29:list(range(0,48))+list(range(96,140)),
 
             #30-33
-            30:list(range(0,48+1))+list(range(100,140+1)), 31:list(range(0,48+1))+list(range(100,140+1)), 32:list(range(0,48+1))+list(range(100,140+1)), 33:list(range(0,48+1))+list(range(100,140+1)),
+            30:list(range(0,48))+list(range(100,140)), 31:list(range(0,48))+list(range(100,140)), 32:list(range(0,48))+list(range(100,140)), 33:list(range(0,48))+list(range(100,140)),
 
-            #34-37
-            34:list(range(100,140+1)), 35:list(range(100,140+1)), 36:list(range(100,140+1)), 37:list(range(100,140+1)),
 
-            #38-41
-            38:list(range(104,140+1)), 39:list(range(104,140+1)), 40:list(range(104,140+1)), 41:list(range(104,140+1)),
+            #38-41: (104-140)
+            34:list(range(100,140)), 35:list(range(100,140)), 36:list(range(100,140)), 37:list(range(100,140)),
+            38:list(range(104,140)), 39:list(range(104,140)), 40:list(range(104,140)), 41:list(range(104,140)),
 
-            #42-45
-            42:list(range(108,140+1)), 43:list(range(108,140+1)), 44:list(range(108,140+1)), 45:list(range(108,140+1)),
+            #42-45: (108-140)
+            42:list(range(108,140)), 43:list(range(108,140)), 44:list(range(108,140)), 45:list(range(108,140)),
 
-            #46-49
-            46:list(range(112,140+1)), 47:list(range(112,140+1)), 48:list(range(112,140+1)), 49:list(range(112,140+1)),
+            #46-49: (112-140)
+            46:list(range(112,140)), 47:list(range(112,140)), 48:list(range(112,140)), 49:list(range(112,140)),
 
-            #50-53
-            50:list(range(120,140+1)), 51:list(range(120,140+1)), 48:list(range(120,140+1)), 49:list(range(120,140+1)),
+            #50-61: (120-140)
+            50:list(range(120,140)), 51:list(range(120,140)), 48:list(range(120,140)), 49:list(range(120,140)),
+            54:list(range(120,140)), 55:list(range(120,140)), 56:list(range(120,140)), 57:list(range(120,140)),
+            58:list(range(120,140)), 59:list(range(120,140)), 60:list(range(120,140)), 61:list(range(120,140)),
 
-            #54-57
-            54:list(range(120,140+1)), 55:list(range(120,140+1)), 56:list(range(120,140+1)), 57:list(range(120,140+1)),
-
-            #58-61
-            58:list(range(120,140+1)), 59:list(range(120,140+1)), 60:list(range(120,140+1)), 61:list(range(120,140+1)),
-
-            #86-89
-            86:list(range(0,40+1)), 87:list(range(0,40+1)), 88:list(range(0,40+1)), 89:list(range(0,40+1)),
-
-            #90-93
-            90:list(range(0,40+1)), 91:list(range(0,40+1)), 92:list(range(0,40+1)), 93:list(range(0,40+1)),
-
-            #94-100
-            94:list(range(0,40+1)), 95:list(range(0,40+1)), 96:list(range(0,40+1)), 97:list(range(0,40+1)), 98:list(range(0,40+1)), 99:list(range(0,40+1)), 100:list(range(0,40+1))
+            #86-100: (0-40)
+            86:list(range(0,40)), 87:list(range(0,40)), 88:list(range(0,40)), 89:list(range(0,40)),
+            90:list(range(0,40)), 91:list(range(0,40)), 92:list(range(0,40)), 93:list(range(0,40)),
+            94:list(range(0,40)), 95:list(range(0,40)), 96:list(range(0,40)), 97:list(range(0,40)), 98:list(range(0,40)), 99:list(range(0,40)), 100:list(range(0,40))
 
         }
     
+    
+    # creating the grid of all points we don't want to pass to predictor model
+    # saves time during training in both data loading and reduced training steps
+    s1_1 = list( product( range(0,10), range(0,49) ) ) #0:9: (0-48)
+    s1_2_new = list( product( range(0,10), range(78,140) ) )#0:9: (64-140)
+
+    s2_1 = list( product( [10], range(0,49) ) )#10: (0-49)
+    s2_2_new = list( product( [10], range(94,140) ) )#10: (96,140)
+
+    s3_1 = list( product( range(11,14), range(0,49) ) )#11-13: (0-49)
+    s3_2_new = list( product( range(11,14), range(93,140) ) )#11-13: (76,140)
+
+    s4_1 = list( product( range(14,30), range(0,49) ) )#14,29: (0-49)
+    s4_2_new = list( product( range(14,30), range(92,140) ) )#19,26: (96,140)
+
+    s5_1 = list( product( range(30,34), range(0,49) ) )#30,33: (0-49)
+    s5_2 = list( product( range(30,34), range(100,140) ) )#30,33: (100,140)
+
+    s6_1_new = list( product( range(34,38), range(0,49) ) )#38,40: (0,49)
+    s6_2_new = list( product( range(36,44), range(0,26) ) )#38,40: (0,49)
+    s6_3_new = list( product( range(0,100), range(0,10) ) )#38,40: (0,49)
+    s6_2_new = list( product( range(32,44), range(102,140) ) )#38,40: (0,49)
+
+    s7_2_new = list( product( range(38,42), range(104,140) ) )#38,41: (104,140)
+    s7_3_new = list( product( range(38,46), range(0,24) ) )#38,41: (104,140)
+
+    s7_1 = list( product( range(42,46), range(104,140) ) )#42,45: (108,140)
+
+    s8_1 = list( product( range(46,50), range(112,140) ) )#46,49: (108,140)
+
+    s9_1 = list( product( range(50,62), range(120,140) ) )#50,61: (108,140)
+
+    s10_1_new = list( product( range(74,100), range(0,40) ) )#50,61: (108,140)
+
+    s11_1_new = list( product( range(0,100), range(126,140) ) )#46,49: (108,140)
+
+    s12_1_new = list( product( range(85,100), range(0,50) ) ) + list( product( range(85,100), range(75,140) ) )#46,49: (108,140)
+
+    s12_2_new = list( product( range(90,100), range(50,75) ) )#46,49: (108,140)
+
+
+    s13_1_new = list( product( range(46,70), range(51,60) ) )#46,49: (108,140)
+
+    s13_2_new = list( product( range(46,54), range(51,73) ) )#46,49: (108,140)
+
+    s13_3_new = list( product( range(68,87), range(40,57) ) )#46,49: (108,140)
+
+    s = s1_1 + s1_2_new + s2_1 + s2_2_new + s3_1 + s3_2_new + s4_1 + s4_2_new + s5_1 + s5_2 +  s6_1_new + s6_2_new + s6_3_new + s7_1 +s7_2_new + s7_3_new + s8_1 + s9_1 + s10_1_new + s11_1_new + s12_1_new + s12_2_new + s13_1_new + s13_2_new +s13_3_new
+    invalid_points_vers2 = sorted(list(set(s)))
+    del s, s1_1 , s1_2_new , s2_1 , s2_2_new , s3_1 , s3_2_new , s4_1 , s4_2_new , s5_1 , s5_2 ,  s6_1_new , s6_2_new , s6_3_new , s7_1 ,s7_2_new , s7_3_new , s8_1 , s9_1 , s10_1_new , s11_1_new , s12_1_new , s12_2_new , s13_1_new , s13_2_new ,s13_3_new
+
     #The longitude lattitude grid for the 0.1 degree E-obs and rainfall data
     latitude_array = np.linspace(58.95, 49.05, 100)
     longitude_array = np.linspace(-10.95, 2.95, 140)
@@ -834,7 +873,6 @@ class Generator():
         
         return ( [upper_h, lower_h], [left_w, right_w] )
 
-    
     def find_nearest_latitude_longitude(self, lat_lon):
         """Given specific lat_lon, this method finds the closest long/lat points on the
             0.1degree grid our input/target data is defined on
@@ -887,7 +925,9 @@ class Generator():
 
         li_boundaries = list( it.product( li_range_h_pairs, li_range_w_pairs ) ) #[ ([h1,h2],[w1,w2]), ... ]
 
-        filtered_boundaries = Generator.get_filtered_boundaries( li_boundaries )
+        # filtered_boundaries = Generator.get_filtered_boundaries( li_boundaries )
+        
+        filtered_boundaries = Generator.get_filtered_boundaries( li_boundaries,dconfig.inner_box_dims )
 
         return filtered_boundaries
     
@@ -921,11 +961,8 @@ class Generator():
     def widx_to_lon(widx):
         return Generator.longitude_array[widx]
 
-        
-
-
     @staticmethod
-    def get_filtered_boundaries(li_boundaries ):
+    def defunc_get_filtered_boundaries(li_boundaries ):
 
         filtered_boundaries = []
         
@@ -933,7 +970,7 @@ class Generator():
         for h_span, w_span in li_boundaries:
             
             # Find the list of points for ignored points based on the h_posiiton
-            relevant_hidxs = [hidx for hidx in Generator.invalid_points.keys() if (hidx>=h_span[0] and hidx<=h_span[1]) ]
+            relevant_hidxs = [hidx for hidx in Generator.invalid_points.keys() if (hidx>h_span[0] and hidx<h_span[1]) ]
 
             if len(relevant_hidxs)==0: 
                 continue
@@ -950,6 +987,42 @@ class Generator():
                 pass
 
         return filtered_boundaries
+
+    @staticmethod
+    def get_filtered_boundaries(li_boundaries, inner_box_dims):
+
+        filtered_boundaries = []
+
+        # Each training datum is defined by its boundaries on a  100by140 grid
+        # From this input boundary we predict/output a central region in the boundary
+        # We drop datums for which the training datum's output region is more than 85% water
+
+        h_span, w_span = li_boundaries[0]
+
+        h_span_radius = hsr = abs(h_span[0] - h_span[1])//2
+        w_span_radius = wsr = abs(w_span[0] - w_span[1])//2
+
+
+        inner_box_dims_h_radius = ihr = inner_box_dims[0]//2
+        inner_box_dims_w_radius = iwr = inner_box_dims[1]//2
+
+        for h_span, w_span in li_boundaries:
+
+            central_h_span = ch_span = [ h_span[0]+hsr-ihr, h_span[1]-hsr+ihr ]
+            central_w_span = cw_span = [ w_span[0]+wsr-iwr, w_span[1]-wsr+iwr ]
+
+            #gettingwspans for the prediction output region            
+            grid_points_in_boundary = list( product( list(range(ch_span[0], ch_span[1]+1)) , list(range(cw_span[0], cw_span[1]+1)) )  )
+
+            count_datum_grid_points = len(grid_points_in_boundary)
+            count_datum_invalid_grid_points  = len( [point for point in grid_points_in_boundary if point in Generator.invalid_points_vers2] )
+
+            invalid_coverage = count_datum_invalid_grid_points / count_datum_grid_points
+
+            if invalid_coverage < (1-0.55):
+                filtered_boundaries.append((h_span, w_span))
+
+        return filtered_boundaries     
 
 class Generator_rain(Generator):
     """ A generator for E-obs 0.1 degree rain data
@@ -1682,9 +1755,13 @@ class Era5EobsDataset(IterableDataset):
             ds.rain_data.data_len_per_worker = per_worker_per_location * ds.loc_count
 
     @staticmethod
-    def parse_data_args(parent_parser):
-        parser = argparse.ArgumentParser(
-            parents=[parent_parser], add_help=True, allow_abbrev=False)
+    def parse_data_args(parent_parser=None, ):
+        
+        if parent_parser != None:
+            parser = argparse.ArgumentParser(
+                parents=[parent_parser], add_help=True, allow_abbrev=False)
+        else:
+            parser = argparse.ArgumentParser( add_help=True, allow_abbrev=False )
 
         parser.add_argument("--original_uk_dim", default=(100,140) )
         parser.add_argument("--input_shape", default=(6,), type=tuple_type ) #TODO: need to roll together input_shape and outer_box_dim logic into one variable. Currently it only refers to the channel depth variable 

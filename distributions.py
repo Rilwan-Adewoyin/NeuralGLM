@@ -167,7 +167,7 @@ class GammaHurdle():
 
     def unscale_distribution( self, mu: Union[Tensor, np.ndarray], disp, 
                             p,
-                            scaler: Union[MinMaxScaler] ):
+                            scaler: Union[MinMaxScaler, MaxAbsScaler] ):
         """When standardizing/destandardizing a glm's output we must be concious of the distribution we are sampling from
 
             Here we provide logic that provides distribution specific scaling for the mu and dispersion terms we predict

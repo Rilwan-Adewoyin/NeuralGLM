@@ -33,7 +33,6 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
     glm_type = "DGLM"
 
     def __init__(self,
-
             scaler_features:Union[MinMaxScaler,StandardScaler],
             scaler_target:Union[MinMaxScaler,StandardScaler],
 
@@ -58,13 +57,15 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
             min_rain_value= 1.0,
             task = None,
+            beta1 = None,
+            
             **kwargs):
 
         super().__init__()
 
         # Task
         self.task = task
-        self.dconfig = kwargs.get('dconfig',None)
+        self.dconfig = kwargs.get('dconfig', None)
 
         # Load Neural Model
         neural_net_class = MAP_NAME_NEURALMODEL[nn_name]
@@ -101,8 +102,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
         self.scaler_features = scaler_features
         self.scaler_target = scaler_target
-        self.register_buffer('target_scale', torch.as_tensor(scaler_target.scale_[0]))
-        self.register_buffer('min_rain_value', torch.as_tensor(min_rain_value))
+        self.register_buffer('target_scale'  , torch.as_tensor( scaler_target.scale_[0]) )
+        self.register_buffer('min_rain_value', torch.as_tensor( min_rain_value) )
 
         # This mu and max needs to be dependent on the scaler
         self.min_dispersion_output_standardized, self.max_disperion_output_standardized = self._get_dispersion_range( distribution_name=self.target_distribution_name )
@@ -110,9 +111,12 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         # Setting on hurdle neural_net 
         self.p_link_name = p_link_name
         self.p_inverse_link_function = self._get_inv_link(self.p_link_name, p_params)
-    
-        self.pixel_sample_prop = kwargs.get('pixel_sample_prop',None)
+
+        # optimizer params
+        self.beta1 = beta1
+        
         # reference to logger in case of debugging
+        self.pixel_sample_prop = kwargs.get('pixel_sample_prop', None)
         self.debugging = debugging
         
     def forward(self, x ):
@@ -256,21 +260,25 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         elif step_name in ['test']:
             # Scaling / Masking but also maintaining tensor shape
 
-            mask = mask
             pred_mu, pred_disp, pred_p = self.target_distribution.unscale_distribution( 
                                                         pred_mu_scaled.detach(), pred_disp_scaled.detach(),
-                                                        pred_p_scaled.detach(), self.scaler_target )
+                                                        pred_p_scaled.detach(), self.scaler_target)
             target_rain_value = self.unscale_rain(target_rain_value_scaled, self.scaler_target)
 
-            output =  {'loss':loss, 'pred_mu':pred_mu.detach().to('cpu'), 'pred_disp':pred_disp.detach().to('cpu'),  
+            output =  {'loss':loss,
+                       
+                       'pred_mu':pred_mu.detach().to('cpu'), 
+                        'pred_disp':pred_disp.detach().to('cpu'),  
                         'pred_p':pred_p.detach().to('cpu'),
-                            'target_did_rain':target_did_rain.detach().to('cpu'),
-                            'target_rain_value':target_rain_value.detach().to('cpu'), 
+                        
+                        'target_did_rain':target_did_rain.detach().to('cpu'),
+                        'target_rain_value':target_rain_value.detach().to('cpu'), 
 
-                            'pred_metrics':pred_metrics,
-                            'composite_losses':composite_losses,
-                            'mask':mask,
-                            'idx_loc_in_region':idx_loc_in_region.detach().to('cpu') if self.task =="uk_rain" else None
+                        'pred_metrics':pred_metrics,
+                        'composite_losses':composite_losses,
+                        
+                        'mask':mask if mask is None else mask.detach().to('cpu'),
+                        'idx_loc_in_region':idx_loc_in_region.detach().to('cpu') if self.task == "uk_rain" else None
 
                             }
                 
@@ -350,15 +358,15 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
         if self.task == "uk_rain": 
             output['li_locations'] = batch.pop('li_locations',None)
+                        
         return output
 
     def test_epoch_end(self, outputs: EPOCH_OUTPUT) -> None:
     
         # Saving the predictions and targets from the test sets
-        pred_mu = torch.cat( [output['pred_mu'] for output in outputs], dim=0 )
-        pred_disp = torch.cat( [output['pred_disp'] for output in outputs], dim=0 )        
-
-        pred_p = torch.cat( [output['pred_p'] for output in outputs], dim=0 )
+        pred_mu = torch.cat( [output['pred_mu'] for output in outputs], dim=0)
+        pred_disp = torch.cat( [output['pred_disp'] for output in outputs], dim=0)
+        pred_p = torch.cat( [output['pred_p'] for output in outputs], dim=0)
 
         idx_loc_in_region = torch.cat( [output['idx_loc_in_region'] for output in outputs], dim=0)
 
@@ -413,8 +421,10 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             dict_location_data = {}
             lookback = dconfig.lookback_target
 
+            mask = torch.cat( [ output['mask'] for output in outputs], dim=0 )
+            mask = mask.cpu().to(torch.float16).numpy()
+            
             #Determining the start and end index for each location's portion of the dataset   
-            # locations = np.repeat( sum( [output['li_locations'] for output in outputs], []), dconfig.lookback_target ).tolist()
             locations = sum( [output['li_locations'] for output in outputs], [])
 
             #Assuming we consider predictions in blocks of 7 (lookback) the below marks is the ith 7 block of predictions where i is where new data for another location starts
@@ -442,6 +452,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                         'target_rain_value':target_rain_value[s_idx_adj:e_idx_adj],
                         'date':np.asarray( date_windows ),
                         'pred_p': pred_p[s_idx_adj:e_idx_adj],
+                        'mask':mask[s_idx_adj:e_idx_adj],
                         'idx_loc_in_region': idx_loc_in_region[s_idx_adj:e_idx_adj] }
                 
                 if loc not in dict_location_data:
@@ -483,19 +494,16 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         
     def configure_optimizers(self):
         #debug
-        optimizer = Adafactor(self.parameters(), scale_parameter=True, relative_step=True, 
-                                warmup_init=True, lr=None, 
-                                weight_decay=0.1,     
-                                clip_threshold=0.25
-                                )
-        # optimizer = Adafactor(self.parameters(), scale_parameter=False, relative_step=False, 
-        #                         warmup_init=False, lr=1e-5, 
-        #                         weight_decay=0.1, 
-        #                         clip_threshold=1.0
-        #                         )
-
+        optimizer = Adafactor(self.parameters(), scale_parameter=True,
+                                relative_step=True, 
+                                warmup_init=True,
+                                lr=None, 
+                                beta1=self.beta1,
+                                clip_threshold=0.5)
+        
         lr_scheduler = AdafactorSchedule(optimizer)
         # lr_scheduler = get_constant_schedule_with_warmup( optimizer, num_warmup_steps=1000, last_epoch=-1)
+        
         return { 'optimizer':optimizer, 
                     'lr_scheduler':lr_scheduler,
                     'frequency':1,
@@ -539,6 +547,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             parents=[parent_parser], add_help=True, allow_abbrev=False)
         parser.add_argument("--target_distribution_name", default="compound_poisson")
 
+        parser.add_argument("--beta1", type=float, default=None )
+
         parser.add_argument("--mu_distribution_name", default="normal")
         parser.add_argument("--mu_link_name", default="identity",help="name of link function used for mu distribution")
         parser.add_argument("--mu_params", default=None, type=tuple_type)
@@ -552,7 +562,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
 
 
-        parser.add_argument("--pos_weight", default=2.0, type=float ,help="The relative weight placed on examples where rain did occur when calculating the loss")
+        parser.add_argument("--pos_weight", default=1.1, type=float ,help="The relative weight placed on examples where rain did occur when calculating the loss")
         parser.add_argument("--pixel_sample_prop", default=0.7, type=float ,help="")
 
         # Compound Poisson arguments
