@@ -25,7 +25,7 @@ from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures, StandardScal
 from loss_utils import *
 import regex as re
 import distributions
-
+from copy import deepcopy
 from typing import List, Dict
 # from pytorch_lightning.utilities.types import _METRIC
 from torch.nn import functional as F
@@ -341,15 +341,21 @@ def default_collate_concat(batch):
         elem_size = len(next(it))
         if not all(len(elem) == elem_size for elem in it):
             raise RuntimeError('each element in list of batch should be of equal size')
-        transposed = list(zip(*batch))  # It may be accessed twice, so we use a list.
-
+        
+        # Handling locations case e.g. list of list of strings
+        if isinstance(next(iter(elem)), string_classes):
+            sequence = batch
+        else:           
+            transposed = list(zip(*batch))  # It may be accessed twice, so we use a list.
+            sequence = transposed
+            
         if isinstance(elem, tuple):
-            return [default_collate_concat(samples) for samples in transposed]  # Backwards compatibility.
+            return [default_collate_concat(samples) for samples in sequence]  # Backwards compatibility.
         else:
             try:
-                return elem_type([default_collate_concat(samples) for samples in transposed])
+                return elem_type([default_collate_concat(samples) for samples in sequence])
             except TypeError:
                 # The sequence type may not support `__init__(iterable)` (e.g., `range`).
-                return [default_collate_concat(samples) for samples in transposed]
+                return [default_collate_concat(samples) for samples in sequence]
 
     raise TypeError(default_collate_err_msg_format.format(elem_type))

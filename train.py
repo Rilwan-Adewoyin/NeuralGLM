@@ -153,16 +153,14 @@ def train( train_args, data_args, glm_args, model_args ):
                             pin_memory=True,
                             collate_fn=cf, 
                             worker_init_fn=worker_init_fn,
-                            prefetch_factor=train_args.prefetch,
-                            persistent_workers=True )
+                            persistent_workers=train_args.workers>0 )
 
     dl_val = DataLoader(ds_val, train_args.batch_size, shuffle=False, 
                             num_workers=train_args.workers,
                             drop_last=False, collate_fn=cf,
                             pin_memory=True,
                             worker_init_fn=worker_init_fn,
-                            prefetch_factor=train_args.prefetch,
-                            persistent_workers=True)
+                            persistent_workers=train_args.workers>0)
 
     dl_test = DataLoader(ds_test, train_args.batch_size, 
                             shuffle=False,
@@ -218,7 +216,7 @@ def train( train_args, data_args, glm_args, model_args ):
 def test( train_args, data_args, glm_args ):
 
     _dir  = os.path.join(
-        f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
+        f"Checkpoints/{train_args.exp_name}/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
         "lightning_logs",f"version_{train_args.test_version}")
 
     hparams_path = os.path.join( _dir, "hparams.yaml")
@@ -238,7 +236,7 @@ def test( train_args, data_args, glm_args ):
                         enable_checkpointing=not train_args.debugging,
                         logger=False,
                         gpus=train_args.gpus,
-                        default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
+                        default_root_dir = os.path.join("Checkpoints",train_args.exp_name,"{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
 
     # Making Dset
     if train_args.dataset == "uk_rain":
@@ -256,9 +254,6 @@ def test( train_args, data_args, glm_args ):
                                 drop_last=False, collate_fn=glm_utils.default_collate_concat, 
                                 worker_init_fn=Era5EobsDataset.worker_init_fn)
 
-    # Patching ModelCheckpoint checkpoint name creation
-
-
     # Test the Trainer
     trainer.test(glm, dataloaders=dl_test)
 
@@ -268,11 +263,10 @@ if __name__ == '__main__':
 
     # Train args
     train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
-            
+    train_parser.add_argument("--exp_name", default='default', type=str )        
     train_parser.add_argument("--gpus", default=1)
     train_parser.add_argument("--sample_size", default=1000)
     train_parser.add_argument("--dataset", default="australia_rain", choices=["toy","australia_rain","uk_rain"])
-
     train_parser.add_argument("--nn_name", default="HLSTM", choices=["MLP","HLSTM","HLSTM_tdscale", "HConvLSTM_tdscale"])
     train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
     train_parser.add_argument("--max_epochs", default=500, type=int)

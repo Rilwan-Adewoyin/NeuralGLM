@@ -25,6 +25,7 @@ import pandas as pd
 import numpy as np
 import torch_optimizer as optim
 from transformers import get_constant_schedule_with_warmup
+from collections import OrderedDict
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
 from  glm_utils import tuple_type
@@ -72,7 +73,6 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         neural_net = neural_net_class( **nn_params )
         self.neural_net = neural_net
 
-        
         # Saving specific hyper-parameters to hparams file
         # this should only run if you are about to train model, atm it runs whenever you load model
         ignore_list = ['save_hparams', "scaler_features","scaler_target","debugging","feature_start_date",
@@ -160,8 +160,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             pred_p = output['p']
 
             # Calculating Losses
-            loss, composite_losses = self.loss_fct( target_rain_value_masked, target_did_rain_masked, pred_mu_masked, 
-                                        pred_disp_masked, logits=pred_logits_masked, p=pred_p_masked, global_step=self.global_step
+            loss, composite_losses = self.loss_fct( target_rain_value, target_did_rain, pred_mu, 
+                                        pred_disp, logits=pred_logits, p=pred_p, global_step=self.global_step
                                          )
 
             #Unscaling predictions
@@ -418,16 +418,26 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
             dconfig = test_dl.dataset.dconfig
                         
-            dict_location_data = {}
+            dict_location_data = OrderedDict()
             lookback = dconfig.lookback_target
 
             mask = torch.cat( [ output['mask'] for output in outputs], dim=0 )
             mask = mask.cpu().to(torch.float16).numpy()
             
+            #Flattening all the objects
+            pred_mu = pred_mu.reshape(-1, *pred_mu.shape[2:] )
+            pred_disp = pred_disp.reshape(-1, *pred_disp.shape[2:] )
+            pred_p = pred_p.reshape(-1, *pred_p.shape[2:] )
+            idx_loc_in_region = idx_loc_in_region.repeat(dconfig.lookback_target,0).shape
+            target_did_rain =target_did_rain.reshape(-1, *target_did_rain.shape[2:] )
+            target_rain_value = target_rain_value.reshape(-1, *target_rain_value.shape[2:] )
+            mask = mask.reshape(-1, *mask.shape[2:] )
+            locations = sum( sum( [output['li_locations'] for output in outputs], []), [] )
+            
             #Determining the start and end index for each location's portion of the dataset   
-            locations = sum( [output['li_locations'] for output in outputs], [])
 
-            #Assuming we consider predictions in blocks of 7 (lookback) the below marks is the ith 7 block of predictions where i is where new data for another location starts
+
+            #Assuming we consider predictions in blocks of 7 (lookback) the below marks every seventh block of predictions where i is where new data for where location starts
             start_idxs_for_location_subset = [ (idx,loc) for idx,loc in enumerate(locations) if (idx==0 or loc!=locations[idx-1]) ]
             end_idxs_for_location_subset = start_idxs_for_location_subset[1:] + [ (len(locations), "End") ] 
 
@@ -444,16 +454,16 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                 e_idx_adj = e_idx
 
                 datum_start_date = dconfig.test_start if (loc not in dict_location_data) else ( dict_location_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
-                date_windows = pd.date_range( start=datum_start_date, periods=(e_idx_adj-s_idx_adj), freq='D', normalize=True  )
+                date_windows = pd.date_range( start=datum_start_date, periods=(e_idx-s_idx), freq='D', normalize=True )
 
-                data = {'pred_mu':pred_mu[s_idx_adj:e_idx_adj],
-                        'pred_disp':pred_disp[s_idx_adj:e_idx_adj],
-                        'target_did_rain':target_did_rain[s_idx_adj:e_idx_adj],
-                        'target_rain_value':target_rain_value[s_idx_adj:e_idx_adj],
+                data = {'pred_mu':pred_mu[s_idx:e_idx],
+                        'pred_disp':pred_disp[s_idx:e_idx],
+                        'target_did_rain':target_did_rain[s_idx:e_idx],
+                        'target_rain_value':target_rain_value[s_idx:e_idx],
                         'date':np.asarray( date_windows ),
-                        'pred_p': pred_p[s_idx_adj:e_idx_adj],
-                        'mask':mask[s_idx_adj:e_idx_adj],
-                        'idx_loc_in_region': idx_loc_in_region[s_idx_adj:e_idx_adj] }
+                        'pred_p': pred_p[s_idx:e_idx],
+                        'mask':mask[s_idx:e_idx],
+                        'idx_loc_in_region': idx_loc_in_region[s_idx:e_idx] }
                 
                 if loc not in dict_location_data:
                     dict_location_data[loc] = data
@@ -574,7 +584,6 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
         glm_args = parser.parse_known_args()[0]
         return glm_args
-
 
     @staticmethod
     def get_ckpt_path(_dir_checkpoint, mode='best'):

@@ -38,6 +38,7 @@ from collections import defaultdict
 from glm_utils import tuple_type
 from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper
 from frozendict import frozendict
+from collections import OrderedDict
 from collections.abc import Collection, Mapping, Hashable
 import functools
 from itertools import product
@@ -706,7 +707,6 @@ class Generator():
 
         }
     
-    
     # creating the grid of all points we don't want to pass to predictor model
     # saves time during training in both data loading and reduced training steps
     s1_1 = list( product( range(0,10), range(0,49) ) ) #0:9: (0-48)
@@ -755,6 +755,7 @@ class Generator():
 
     s = s1_1 + s1_2_new + s2_1 + s2_2_new + s3_1 + s3_2_new + s4_1 + s4_2_new + s5_1 + s5_2 +  s6_1_new + s6_2_new + s6_3_new + s7_1 +s7_2_new + s7_3_new + s8_1 + s9_1 + s10_1_new + s11_1_new + s12_1_new + s12_2_new + s13_1_new + s13_2_new +s13_3_new
     invalid_points_vers2 = sorted(list(set(s)))
+    
     del s, s1_1 , s1_2_new , s2_1 , s2_2_new , s3_1 , s3_2_new , s4_1 , s4_2_new , s5_1 , s5_2 ,  s6_1_new , s6_2_new , s6_3_new , s7_1 ,s7_2_new , s7_3_new , s8_1 , s9_1 , s10_1_new , s11_1_new , s12_1_new , s12_2_new , s13_1_new , s13_2_new ,s13_3_new
 
     #The longitude lattitude grid for the 0.1 degree E-obs and rainfall data
@@ -781,8 +782,6 @@ class Generator():
         self.generator = None
         self.all_at_once = all_at_once
         self.fp = fp
-        
-
         
         # Retrieving information on temporal length of  dataset        
         with nDataset(self.fp, "r+", format="NETCDF4") as ds:
@@ -912,22 +911,21 @@ class Generator():
         h_span, w_span = dconfig.outer_box_dims
 
         #list of values for upper_h and lower_h
-        h_start_idx = 0 #if not shuffle else random.randint(0, h_shift-1) //This can not be shuffled since you also have to change the idx_loc_in_region
+        h_start_idx = 0
         range_h = np.arange(h_start_idx, original_uk_dim[0]-h_span, step=h_shift, dtype=np.int32 ) 
         # list of pairs of values (upper_h, lower_h)
         li_range_h_pairs = [ [range_h[i], range_h[i]+h_span] for i in range(0,len(range_h))]
         
-        #list of values for left_w and right_w
-        w_start_idx = 0 #if not shuffle else random.randint(0, w_shift-1)
+        #list of values for (left_w and right_w)
+        w_start_idx = 0
         range_w = np.arange(w_start_idx, original_uk_dim[1]-w_span, step=w_shift, dtype=np.int32)
+        
         # list of pairs of values (left_w, right_w)
         li_range_w_pairs = [ [range_w[i], range_w[i]+w_span ] for i in range(0,len(range_w))]
 
         li_boundaries = list( it.product( li_range_h_pairs, li_range_w_pairs ) ) #[ ([h1,h2],[w1,w2]), ... ]
-
-        # filtered_boundaries = Generator.get_filtered_boundaries( li_boundaries )
         
-        filtered_boundaries = Generator.get_filtered_boundaries( li_boundaries,dconfig.inner_box_dims )
+        filtered_boundaries = Generator.get_filtered_boundaries( li_boundaries, dconfig.inner_box_dims)
 
         return filtered_boundaries
     
@@ -962,33 +960,6 @@ class Generator():
         return Generator.longitude_array[widx]
 
     @staticmethod
-    def defunc_get_filtered_boundaries(li_boundaries ):
-
-        filtered_boundaries = []
-        
-        # We filter away obvious training points which are over water
-        for h_span, w_span in li_boundaries:
-            
-            # Find the list of points for ignored points based on the h_posiiton
-            relevant_hidxs = [hidx for hidx in Generator.invalid_points.keys() if (hidx>h_span[0] and hidx<h_span[1]) ]
-
-            if len(relevant_hidxs)==0: 
-                continue
-            relevant_wspans = sum( [Generator.invalid_points[hidx] for hidx in relevant_hidxs], [] )
-
-            relevant_wspans = list(set(relevant_wspans))
-
-            w_span_range = list(range(w_span[0], w_span[1]+1))
-
-            # We check if all idxs in w_span are valid, if so we add to filtered_boundaries
-            if  all( (widx not in relevant_wspans) for widx in w_span_range ):
-                filtered_boundaries.append( (h_span,w_span) )
-            else:
-                pass
-
-        return filtered_boundaries
-
-    @staticmethod
     def get_filtered_boundaries(li_boundaries, inner_box_dims):
 
         filtered_boundaries = []
@@ -1007,9 +978,12 @@ class Generator():
         inner_box_dims_w_radius = iwr = inner_box_dims[1]//2
 
         for h_span, w_span in li_boundaries:
-
-            central_h_span = ch_span = [ h_span[0]+hsr-ihr, h_span[1]-hsr+ihr ]
-            central_w_span = cw_span = [ w_span[0]+wsr-iwr, w_span[1]-wsr+iwr ]
+            
+            mid_point_h = h_span[0] + hsr
+            mid_point_w = w_span[0] + wsr
+            
+            central_h_span = ch_span = [ mid_point_h-ihr, mid_point_h+ihr ]
+            central_w_span = cw_span = [ mid_point_w-iwr, mid_point_w+iwr ]
 
             #gettingwspans for the prediction output region            
             grid_points_in_boundary = list( product( list(range(ch_span[0], ch_span[1]+1)) , list(range(cw_span[0], cw_span[1]+1)) )  )
@@ -1081,7 +1055,7 @@ class Generator_mf(Generator):
     """Creates a generator for the model_fields_dataset
     """
 
-    def __init__(self, vars_for_feature, **generator_params):
+    def __init__(self, vars_for_feature=None, **generator_params):
         """[summary]
 
         Args:
@@ -1089,7 +1063,7 @@ class Generator_mf(Generator):
         """        
         super(Generator_mf, self).__init__(**generator_params)
 
-        self.vars_for_feature = vars_for_feature #['unknown_local_param_137_128', 'unknown_local_param_133_128', 'air_temperature', 'geopotential', 'x_wind', 'y_wind' ]       
+        self.vars_for_feature = vars_for_feature if vars_for_feature else ['unknown_local_param_137_128', 'unknown_local_param_133_128', 'air_temperature', 'geopotential', 'x_wind', 'y_wind' ]       
         # self.start_idx = 0
         # self.end_idx =0 
         #self.ds = Dataset(self.fp, "r", format="NETCDF4")
@@ -1140,7 +1114,11 @@ class Era5EobsDataset(IterableDataset):
         self.dconfig = dconfig
         self.target_range = target_range
         self.locations = locations if locations else dconfig.locations
-        self.loc_count = loc_count if loc_count else dconfig.loc_count
+        
+        self.loc_count = len(self.locations)  if \
+                    self.locations != ["All"] else \
+                    len( Generator.get_locs_for_whole_map(dconfig))
+        
         self.end_date = end_date
         start_idx_feat, start_idx_tar = self.get_idx(start_date)
         end_idx_feat, end_idx_tar = self.get_idx(end_date)
@@ -1178,7 +1156,7 @@ class Era5EobsDataset(IterableDataset):
             
             self.cache_path = query_res['cache_path'].iloc[0]
             self.cache_exists = os.path.exists(self.cache_path)
-        
+            os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
             # Otherwise set up parameters to use the normal dataset
         else:
             os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
@@ -1196,8 +1174,7 @@ class Era5EobsDataset(IterableDataset):
                                             iter_chunk_size=self.dconfig.lookback_target*self.gen_size,
                                             lookback=self.dconfig.lookback_target,
                                             start_idx=start_idx_tar,
-                                            end_idx = end_idx_tar
-                                            )
+                                            end_idx = end_idx_tar )
 
             # Create python generator for model field data 
             mf_fp = self.dconfig.data_dir + "/" + self.dconfig.mf_fn
@@ -1252,14 +1229,16 @@ class Era5EobsDataset(IterableDataset):
                                     **kwargs)
 
         # assert dconfig.locations_test != ["All"], "Can not test over Whole map. please consider using `All_Cities"
+        kwargs.pop('workers')
         ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
-                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count,
+                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count_test,
                                     dconfig=dconfig,
                                     target_range=target_range,
                                     target_distribution_name=target_distribution_name,
                                     scaler_features = ds_train.scaler_features,
                                     scaler_target = ds_train.scaler_target,
                                     shuffle=False,
+                                    workers=0,
                                     **kwargs)
 
         return ds_train, ds_val, ds_test, ds_train.scaler_features, ds_train.scaler_target
@@ -1269,7 +1248,7 @@ class Era5EobsDataset(IterableDataset):
 
         # assert dconfig.locations_test != ["All"], "Can not test over Whole map. please consider using `All_Cities"
         ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
-                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count,
+                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count_test,
                                     dconfig=dconfig,
                                     target_range=target_range,
                                     target_distribution_name=target_distribution_name,
@@ -1342,7 +1321,7 @@ class Era5EobsDataset(IterableDataset):
                         li_dicts = [ {k:v.unsqueeze(0) if k!="li_locations" else v for k,v in dict_data.items()} ]
                         
                     else:
-                        _ =  {k:v.unbind() if k!="li_locations" else v for k,v in dict_data.items()} 
+                        _ =  {k:v.unbind() if k!="li_locations" else v.tolist() for k,v in dict_data.items()} 
                         li_dicts = [ {key:_[key][idx].unsqueeze(0) if key!="li_locations" else _[key][idx] for key in dict_data.keys() } for idx in range(len(dict_data['target'])) ]
                     
                     # shuffling data 
@@ -1374,11 +1353,12 @@ class Era5EobsDataset(IterableDataset):
             else:
                 bool_update_scaler_target = False
             
+            #Developing Data Cache and Scalers
             for idx, ( (feature, feature_mask), (target, target_mask) ) in enumerate( zip( self.mf_data, self.rain_data)):
 
                 dict_data = self.preprocess_batch(feature, feature_mask, target, target_mask, normalize=False)
 
-                #Developing Data Cache and Scalers
+                
                 if not self.cache_exists:
                     kwargs ={ 
                         "data_vars":{
@@ -1386,7 +1366,7 @@ class Era5EobsDataset(IterableDataset):
                                 "target": ( ("sample_idx","lookback_target","h_target","w_target"),torch.concat(dict_data['target']).numpy() ),
                                 "mask": ( ("sample_idx","lookback_target","h_target","w_target"),torch.concat(dict_data['mask']).numpy() ),
                                 "idx_loc_in_region": ( ("sample_idx","h_w"), np.concatenate(dict_data['idx_loc_in_region']) ) ,
-                                "li_locations": ( ("sample_idx"), dict_data['li_locations'] )
+                                "li_locations": ( ("sample_idx",'lookback_target'), np.asarray(sum( dict_data['li_locations'], [])) )
                                 }
                             }
                                            
@@ -1409,7 +1389,7 @@ class Era5EobsDataset(IterableDataset):
                     else:
 
                         kwargs['coords'] = {
-                            "sample_idx": np.arange( xr_curr.dims['sample_idx'], xr_curr.dims['sample_idx']+torch.concat(dict_data['input']).shape[0]  ),
+                            "sample_idx": np.arange( xr_curr.dims['sample_idx'], xr_curr.dims['sample_idx']+torch.concat(dict_data['input']).shape[0]),
 
                             "lookback_feat": np.arange( self.dconfig.lookback_feature),
                             "lookback_target": np.arange( self.dconfig.lookback_target),
@@ -1419,7 +1399,7 @@ class Era5EobsDataset(IterableDataset):
 
                             "h_target": np.arange( dict_data['target'][0].shape[-2]),
                             "w_target": np.arange( dict_data['target'][0].shape[-1]),
-                            "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] ),
+                            "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1]),
 
                             "d": np.arange( dict_data['input'][0].shape[-1]),
                         }
@@ -1456,7 +1436,7 @@ class Era5EobsDataset(IterableDataset):
                 
                 # yield dict_data
                 if type(dict_data['input'])==tuple:
-                    li_dicts = [ {key:dict_data[key][idx] for key in dict_data.keys() }for idx in range(len(dict_data['target'])) ]
+                    li_dicts = [ {key:dict_data[key][idx] for key in dict_data.keys() } for idx in range(len(dict_data['target'])) ]
                     yield from li_dicts
                 
                 else:
@@ -1479,9 +1459,14 @@ class Era5EobsDataset(IterableDataset):
         # Unbundling each variable for each location
         # Converting it into one long sequence for each variable for a location instead of chunks of 7 day data
         for loc in self.locations:
-            loc_dict = { }
+            loc_dict = OrderedDict()
 
-            location_data = [ dict_ for dict_ in li_dicts if dict_["li_locations"]==loc ]
+            try:
+                location_data = [ dict_ for dict_ in li_dicts if all( (l == loc for l in dict_["li_locations"]) ) ]
+            except ValueError as e:
+                location_data = [ dict_ for dict_ in li_dicts if (dict_["li_locations"]==loc).all() ]
+            
+            
             if len(location_data) ==0: 
                 continue
 
@@ -1501,7 +1486,7 @@ class Era5EobsDataset(IterableDataset):
                     
                     elif key in ['mask']:
                         key_data = torch.cat( [_dict[key].squeeze(0) for _dict in location_data], dim=0 )
-
+                                            
                 else:
                     key_data = [_dict[key] for _dict in location_data]
                                 
@@ -1511,7 +1496,7 @@ class Era5EobsDataset(IterableDataset):
         
         # rebatching into weeks with a n day increment
         for loc in dict_loc_unbundled.keys():
-            dict_loc_batched[loc] = {}
+            dict_loc_batched[loc] = OrderedDict()
             # incrementing and batching
             for key in keys:
                 
@@ -1570,7 +1555,7 @@ class Era5EobsDataset(IterableDataset):
 
         # Preparing feature model fields
         # unbatch
-        feature = feature.view(-1, self.dconfig.lookback_feature ,*feature.shape[-3:] ) # ( bs*feat_days ,h, w, shape_feat)
+        feature = feature.view(-1, self.dconfig.lookback_feature, *feature.shape[-3:] ) # ( bs*feat_days ,h, w, shape_feat)
         feature_mask = feature_mask.view(-1, self.dconfig.lookback_feature,*feature.shape[-3:] ) # ( bs*feat_days ,h, w, shape_dim)
         
         if normalize:
@@ -1587,7 +1572,7 @@ class Era5EobsDataset(IterableDataset):
 
         li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs = self.location_extractor( feature, target, target_mask, self.locations)
         
-        dict_data = { k:v for k,v in zip(['input','target','mask','idx_loc_in_region','li_locations' ], [li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs] ) }
+        dict_data = { k:v for k,v in zip(['input','target','mask','idx_loc_in_region','li_locations'], [li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs] ) }
         return dict_data
 
     def get_idx(self, date:Union[np.datetime64,str]):
@@ -1601,7 +1586,6 @@ class Era5EobsDataset(IterableDataset):
         """        
 
         if type(date)==str:
-            date = copy.deepcopy(date)
             date = np.datetime64(date)
             
         feature_start_date = self.dconfig.feature_start_date
@@ -1632,16 +1616,15 @@ class Era5EobsDataset(IterableDataset):
             
             locs_latlon_for_whole_map = Generator.get_locs_latlon_for_whole_map(self.dconfig) #[ ([lat1, lat2]. [lon1, lon2]), ... ]
 
-            #Convert to string format
-            locs_latlon_for_whole_map = [  
-                'lat_' + '_'.join(map("{:.2f}".format,lilat_lilon[0])) + '_lon_' + '_'.join(map("{:.2f}".format,lilat_lilon[1]))
-                for lilat_lilon in locs_latlon_for_whole_map ]
-            
-            li_locs = np.repeat(locs_latlon_for_whole_map, len(target) )
+            #Convert to string format            
+            li_hw_idxs_str = [ str(hw_idxs) for hw_idxs in li_hw_idxs ]
+            #li_locs = np.repeat(li_hw_idxs_str, len(target) )
+            li_locs = [[[loc]*target.shape[1]]*target.shape[0] for loc in li_hw_idxs_str] 
 
         else:
             li_hw_idxs = [ self.rain_data.find_idx_of_loc_region( _loc, self.dconfig ) for _loc in locations ] #[ (h_idx,w_idx), ... ]
-            li_locs = np.repeat(locations, len(target) )
+            #li_locs = np.repeat(locations, len(target) )
+            li_locs = [[[loc]*target.shape[1]]*target.shape[0] for loc in locations] 
 
         # Creating seperate datasets for each location
         li_feature, li_target, li_target_mask = zip(*[self.select_region( feature, target, target_mask, hw_idxs[0], hw_idxs[1] ) for hw_idxs in li_hw_idxs ] )
@@ -1815,7 +1798,6 @@ class Era5EobsDataset(IterableDataset):
         }
         dconfig.vars_for_feature = ['unknown_local_param_137_128', 'unknown_local_param_133_128', 'air_temperature', 'geopotential', 'x_wind', 'y_wind' ]
         
-
         dconfig.window_shift = dconfig.lookback_target
         
         #Input is at 6 hour intervals, target is daily
@@ -1880,7 +1862,6 @@ class Era5EobsDataset(IterableDataset):
         return vals
     
     @staticmethod
-    # @lru_cache(100)
     def central_region_bounds(dconfig):
         """Returns the indexes defining the boundaries for the central regions for evaluation
 
@@ -1917,7 +1898,6 @@ class Era5EobsDataset(IterableDataset):
         tensor = torch.where(mask, tensor, mask_val)
 
         return tensor
-
 
 # endrefion
 MAP_NAME_DSET = {'toy':ToyDataset, 'australia_rain':AustraliaRainDataset, 'uk_rain':Era5EobsDataset }
