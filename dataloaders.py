@@ -4,9 +4,9 @@ from pydoc import apropos
 from re import L, M
 from tokenize import String
 from attr import has
-from netCDF4 import Dataset as nDataset
 from aiohttp import worker
 from functools import lru_cache
+import hashlib
 import numpy as np
 import pandas as pd
 from pandas._libs import missing
@@ -20,6 +20,7 @@ import math
 import copy
 from pytorch_lightning.profiler import Profiler, PassThroughProfiler
 import os
+from torch._six import string_classes
 import ujson
 import pickle
 import regex  as re
@@ -29,6 +30,7 @@ import argparse
 import json
 import ujson
 import xarray as xr
+from netCDF4 import Dataset as nDataset
 import itertools as it
 import glob
 from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
@@ -707,6 +709,7 @@ class Generator():
 
         }
     
+    #region
     # creating the grid of all points we don't want to pass to predictor model
     # saves time during training in both data loading and reduced training steps
     s1_1 = list( product( range(0,10), range(0,49) ) ) #0:9: (0-48)
@@ -757,13 +760,15 @@ class Generator():
     invalid_points_vers2 = sorted(list(set(s)))
     
     del s, s1_1 , s1_2_new , s2_1 , s2_2_new , s3_1 , s3_2_new , s4_1 , s4_2_new , s5_1 , s5_2 ,  s6_1_new , s6_2_new , s6_3_new , s7_1 ,s7_2_new , s7_3_new , s8_1 , s9_1 , s10_1_new , s11_1_new , s12_1_new , s12_2_new , s13_1_new , s13_2_new ,s13_3_new
-
+    # endregion
+    
     #The longitude lattitude grid for the 0.1 degree E-obs and rainfall data
     latitude_array = np.linspace(58.95, 49.05, 100)
     longitude_array = np.linspace(-10.95, 2.95, 140)
 
-    def __init__(self, fp, lookback, iter_chunk_size
-                    ,all_at_once=False, start_idx=0, end_idx=None
+    def __init__(self, fp, lookback, iter_chunk_size,
+                 all_at_once=False, start_idx=0, end_idx=None,
+                    dset_start_date=None, dset_time_freq=None, 
                     ):
         """Extendable Class handling the generation of model field and rain data
             from E-Obs and ERA5 datasets
@@ -776,8 +781,8 @@ class Generator():
         """ 
 
         if iter_chunk_size%lookback!=0:
-            print("Iter chunk size must be a multiple of lookback to ensure that the samples we pass to the LSTM can be transformed to the correct shape")
-            iter_chunk_size = lookback* int( ( iter_chunk_size+ + lookback/2)//lookback )
+            print("Iter chunk size must be a multiple of lookback to ensure that the samples we pass to model can be transformed to the correct shape")
+            iter_chunk_size = lookback* int( ( iter_chunk_size+  lookback/2)//lookback )
 
         self.generator = None
         self.all_at_once = all_at_once
@@ -794,7 +799,12 @@ class Generator():
         self.start_idx = start_idx
         self.end_idx = end_idx if end_idx else self.start_idx + self.max_data_len
         
-        # Ensuring we end_idx is a multiple of lookback away
+        self.dset_start_date = dset_start_date
+        self.dset_time_freq = dset_time_freq 
+        self.date_range = np.asarray( pd.date_range( start= dset_start_date, periods=self.max_data_len, freq=self.dset_time_freq, normalize=True  ) )
+
+        
+        # Ensuring we end_idx is a multiple of lookback away 
         self.end_idx = self.start_idx+ int(((self.end_idx-self.start_idx)//self.lookback)*self.lookback )
 
         self.data_len_per_location = self.end_idx - self.start_idx
@@ -1005,7 +1015,7 @@ class Generator_rain(Generator):
         A python generator for the rain data
         
     """
-    def __init__(self, **generator_params ):
+    def __init__(self,**generator_params ):
         super(Generator_rain, self).__init__(**generator_params)
         
     def yield_all(self):
@@ -1019,8 +1029,8 @@ class Generator_rain(Generator):
     def yield_iter(self):
         """ Return data in chunks"""
 
-        # xr_gn = xr.open_dataset( self.fp, cache=False, decode_times=False, decode_cf=False)
-        with xr.open_dataset( self.fp, cache=False, decode_times=False, decode_cf=False, ) as xr_gn:
+        # xr_gn = xr.open_dataset( self.fp, cache=False, decode_times=False, decode_cf=False, chunks={'time': self.iter_chunk_size})
+        with xr.open_dataset( self.fp, cache=True, decode_times=False, decode_cf=False ) as xr_gn:
             idx = copy.deepcopy(self.start_idx)
             # final_idx =  min( self.start_idx+self.data_len_per_location, self.end_idx) 
             # # Same affect as drop_last = True. Ensures that we extract segments with size a mulitple of lookback
@@ -1037,6 +1047,7 @@ class Generator_rain(Generator):
                 slice_h = slice( None , None, -1 )
                 slice_w = slice( None, None )
 
+                date_windows  = np.asarray( self.date_range[slice_t] )
                 marray = xr_gn.isel(time=slice_t ,latitude=slice_h, longitude=slice_w)['rr'].to_masked_array(copy=True)
                 array, mask = np.ma.getdata(marray), np.ma.getmask(marray)
 
@@ -1044,7 +1055,7 @@ class Generator_rain(Generator):
                 
                 idx+=adj_iter_chunk_size
 
-                yield array, mask
+                yield array, mask, date_windows
 
     def __call__(self):
         return self.yield_iter()
@@ -1067,7 +1078,8 @@ class Generator_mf(Generator):
         # self.start_idx = 0
         # self.end_idx =0 
         #self.ds = Dataset(self.fp, "r", format="NETCDF4")
-
+        
+        
     def yield_all(self):
         
         xr_gn = xr.open_dataset(self.fp, cache=False, decode_times=False, decode_cf=False)
@@ -1081,8 +1093,8 @@ class Generator_mf(Generator):
         return xr_gn
 
     def yield_iter(self):
-        # xr_gn = xr.open_dataset(self.fp, cache=False, decode_times=False, decode_cf=False, cache=False)
-        with xr.open_dataset(self.fp, cache=False, decode_times=False, decode_cf=False) as xr_gn:
+        # xr_gn = xr.open_dataset(self.fp, cache=False, decode_times=False, decode_cf=False, cache=False, chunks={'time': self.iter_chunk_size})
+        with xr.open_dataset(self.fp, cache=True, decode_times=False, decode_cf=False ) as xr_gn:
             idx = copy.deepcopy(self.start_idx)
 
             while idx < self.end_idx:
@@ -1090,7 +1102,9 @@ class Generator_mf(Generator):
                 adj_iter_chunk_size = min(self.iter_chunk_size, self.end_idx-idx )
 
                 _slice = slice( idx , idx  + adj_iter_chunk_size)
-                next_marray = [ xr_gn[name].isel(time=_slice).to_masked_array(copy=True) for name in self.vars_for_feature ]
+                xr_gen_slice = xr_gn.isel(time=_slice)
+                next_marray = [ xr_gen_slice[name].to_masked_array(copy=True) for name in self.vars_for_feature  ]
+                #next_marray = [ xr_gn[name].isel(time=_slice).to_masked_array(copy=True) for name in self.vars_for_feature ]
                 
                 list_datamask = [(np.ma.getdata(_mar), np.ma.getmask(_mar)) for _mar in next_marray]
                 
@@ -1115,16 +1129,16 @@ class Era5EobsDataset(IterableDataset):
         self.target_range = target_range
         self.locations = locations if locations else dconfig.locations
         
-        self.loc_count = len(self.locations)  if \
-                    self.locations != ["All"] else \
-                    len( Generator.get_locs_for_whole_map(dconfig))
+        self.loc_count = loc_count
         
         self.end_date = end_date
         start_idx_feat, start_idx_tar = self.get_idx(start_date)
         end_idx_feat, end_idx_tar = self.get_idx(end_date)
-        self.gen_size = kwargs.get('gen_size',None)
+        self.gen_size = kwargs.get('gen_size',40)
         self.workers = workers
         self.shuffle = shuffle
+        self.cache_gen_size = kwargs.get('cache_gen_size', 4)
+        self.xarray_decode = kwargs.get('xarray_decode', False)
         
         # region Checking for pre-existing scalers - If not exists we create in next section
         try:
@@ -1137,7 +1151,7 @@ class Era5EobsDataset(IterableDataset):
         # endregion
         
         # region Checking for cache of dataset 
-        premade_dset_path = os.path.join('Data','uk_rain','premade_dset_record.txt')
+        premade_dset_path = os.path.join(dconfig.data_dir,'premade_dset_record.txt')
         if os.path.exists(premade_dset_path):
             premade_dsets = pd.read_csv( premade_dset_path)
         else:
@@ -1146,7 +1160,7 @@ class Era5EobsDataset(IterableDataset):
 
         # Query for if cache for dataset and normalizer
         query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' and \
-                                    locations == '{'_'.join([loc[:2] for loc in self.locations])}' and \
+                                    locations == '{Era5EobsDataset.locations_enc(self.locations, dconfig=self.dconfig)}' and \
                                     lookback == {str(self.dconfig.lookback_target)} and \
                                     target_range == '{','.join(map(str,target_range))}' and \
                                     outer_box_dims == '{','.join(map(str,dconfig.outer_box_dims))}'")
@@ -1161,15 +1175,17 @@ class Era5EobsDataset(IterableDataset):
         else:
             os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
             self.cache_path = os.path.join( self.dconfig.data_dir, "cache",
-                f"start-{start_date}-end-{end_date}_lbtarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-outer_box_dims-{','.join(map(str,dconfig.outer_box_dims))} -locs-{'_'.join([loc[:2] for loc in self.locations])}")
+                f"start-{start_date}-end-{end_date}_lbtarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-outer_box_dims-{','.join(map(str,dconfig.outer_box_dims))}-locs-{Era5EobsDataset.locations_enc(self.locations, dconfig=self.dconfig)}")
             self.cache_exists = os.path.exists(self.cache_path)
         # endregion
 
-        #Finally if any of cache or scalers don't exists we create the non existent ones
+        #Finally if any of cache or scalers don't exists we create the non existing ones
         if not self.cache_exists or self.scaler_features == None or self.scaler_target ==  None:
             # Create python generator for rain data
             fp_rain = self.dconfig.data_dir+"/"+self.dconfig.rain_fn
             self.rain_data = Generator_rain(fp=fp_rain,
+                                            dset_start_date=self.dconfig.target_start_date,
+                                            dset_time_freq = 'D',
                                             all_at_once=False,
                                             iter_chunk_size=self.dconfig.lookback_target*self.gen_size,
                                             lookback=self.dconfig.lookback_target,
@@ -1179,6 +1195,8 @@ class Era5EobsDataset(IterableDataset):
             # Create python generator for model field data 
             mf_fp = self.dconfig.data_dir + "/" + self.dconfig.mf_fn
             self.mf_data = Generator_mf(fp=mf_fp, vars_for_feature=self.dconfig.vars_for_feature, 
+                                        dset_start_date=self.dconfig.feature_start_date,
+                                        dset_time_freq = '6h',
                                         all_at_once=False, 
                                         iter_chunk_size=self.dconfig.lookback_feature*self.gen_size,
                                         lookback=self.dconfig.lookback_feature,
@@ -1194,7 +1212,7 @@ class Era5EobsDataset(IterableDataset):
                 'cache_path':self.cache_path,
                 'start_date':start_date,
                 'end_date':end_date,
-                'locations':'_'.join([loc[:2] for loc in self.locations]),
+                'locations':  Era5EobsDataset.locations_enc(self.locations, dconfig=self.dconfig), # '_'.join([loc[:2] for loc in self.locations]),
                 'lookback':str(self.dconfig.lookback_target),
                 'target_range':','.join(map(str,target_range)),
                 'outer_box_dims':','.join(map(str,dconfig.outer_box_dims) )
@@ -1207,6 +1225,23 @@ class Era5EobsDataset(IterableDataset):
         self.features_mean = torch.as_tensor( self.scaler_features.mean_ )
         self.target_scale = torch.as_tensor( self.scaler_target.scale_ )
 
+    @staticmethod
+    def locations_enc(li_locations, **kwargs):
+        
+        if isinstance( li_locations[0], string_classes):
+            # Use string shortening encoding method
+            location_encoded = '_'.join([loc[:2] for loc in li_locations])
+        
+        elif li_locations[0] in Generator.get_locs_for_whole_map(kwargs['dconfig'] ):
+            # Use hashing to created shortened string
+            
+            s = str_li_locations = str(li_locations)
+            s = s.encode('utf-8')
+            
+            location_encoded = hashlib.sha1(s).hexdigest()
+        
+        return location_encoded
+    
     @staticmethod
     def get_dataset( dconfig, target_range, target_distribution_name,**kwargs):
 
@@ -1227,9 +1262,7 @@ class Era5EobsDataset(IterableDataset):
                                     scaler_target = ds_train.scaler_target,
                                     shuffle=False,
                                     **kwargs)
-
-        # assert dconfig.locations_test != ["All"], "Can not test over Whole map. please consider using `All_Cities"
-        kwargs.pop('workers')
+            
         ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
                                     locations=dconfig.locations_test, loc_count=dconfig.loc_count_test,
                                     dconfig=dconfig,
@@ -1238,7 +1271,7 @@ class Era5EobsDataset(IterableDataset):
                                     scaler_features = ds_train.scaler_features,
                                     scaler_target = ds_train.scaler_target,
                                     shuffle=False,
-                                    workers=0,
+                                    xarray_decode=True,
                                     **kwargs)
 
         return ds_train, ds_val, ds_test, ds_train.scaler_features, ds_train.scaler_target
@@ -1246,7 +1279,6 @@ class Era5EobsDataset(IterableDataset):
     @staticmethod
     def get_test_dataset( dconfig, target_range, target_distribution_name, scaler_features, scaler_target, **kwargs):
 
-        # assert dconfig.locations_test != ["All"], "Can not test over Whole map. please consider using `All_Cities"
         ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
                                     locations=dconfig.locations_test, loc_count=dconfig.loc_count_test,
                                     dconfig=dconfig,
@@ -1260,15 +1292,20 @@ class Era5EobsDataset(IterableDataset):
         return  ds_test
 
     def __iter__(self):
-
+        
         if self.cache_exists and self.scaler_features and self.scaler_target:
-          
-            with xr.open_dataset( self.cache_path, cache=True, ) as xr_cache:
+            
+            # with xr.open_dataset( self.cache_path, decode_cf=self.xarray_decode, decode_times=self.xarray_decode,  cache=True ) as xr_cache:
+            with nDataset(self.cache_path, 'r') as xr_cache :
+                
                 # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
                 
                 if not hasattr(self, 'max_cache_len'):
                     # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
-                    self.max_cache_len = xr_cache["sample_idx"].shape[0]
+                    # self.max_cache_len = xr_cache["target"].shape[0]
+                    self.max_cache_len = xr_cache.dims['sample_idx']
+                    # self.max_cache_len = xr_cache.dimensions.sample_idx.size
+                    
 
                 # Making sure its a multiple of lookback away from start idx
                 if not hasattr(self, 'cache_start_idx'):
@@ -1279,68 +1316,68 @@ class Era5EobsDataset(IterableDataset):
 
                 if not hasattr(self, 'cache_len'):
                     self.cache_len = self.cache_end_idx + 1 - self.cache_start_idx
-                
-                # # Adding Shuffling
-                # # This is shuffling in sequence of days we pass to the model
-                if self.shuffle:
-                    # We adjust the start idx of model field and rain data
-                    # The amount to increment the target, e.g. number of days 
-                    # Debug
-                    self.target_sub_idx_increment = random.randint(0, self.dconfig.lookback_target)
-                    self.feature_sub_idx_increment = self.target_sub_idx_increment*4
-          
-                idx = copy.deepcopy(self.cache_start_idx)
-
-                while idx < self.cache_end_idx :
-                    adj_iter_chunk_size = min( self.gen_size, self.cache_end_idx-idx )
-
-                    _slice = slice( idx , idx  + adj_iter_chunk_size)
-                    dict_data = { name:torch.tensor( xr_cache[name].isel(sample_idx=_slice).data )
+                         
+                # Implementing more effecient shuffling method - base on choosing slices to extract at random 
+                # replaces holding buffer
+                li_slices = [ slice( idx , min( idx  + self.cache_gen_size, self.cache_end_idx) ) for idx in range(self.cache_start_idx, self.cache_end_idx, self.cache_gen_size ) ]
+                if self.shuffle == True:
+                    random.shuffle(li_slices)
+                for _slice in li_slices:
+                                    
+                    xr_cache_slice = xr_cache.isel(sample_idx=_slice).load()
+                    
+                    dict_data = { name:torch.tensor( xr_cache_slice[name].data )
                                     for name in ['input','target','mask','idx_loc_in_region'] }
 
-                    dict_data['li_locations'] = xr_cache['li_locations'].isel(sample_idx=_slice).data 
-                                                      
-                    dict_data['input'] = (dict_data['input'] - self.features_mean )/self.features_scale
+                    dict_data['li_locations'] = xr_cache_slice['li_locations'].data.tolist()
+                    try:
+                        dict_data['target_date_window'] = xr_cache_slice['target_date_window'].data
+                    except ValueError as e:
+                        dict_data['target_date_window'] = np.asarray(pd.date_range('1979', periods=0)).reshape((-1,7))
+
+                    if dict_data['target_date_window'].dtype != '<M8[ns]':
+                        dict_data['target_date_window'] = dict_data['target_date_window'].astype('<M8[ns]')
+                        
+                    dict_data['target_date_window'] = dict_data['target_date_window'].astype('datetime64[us]').tolist()
+                    
+                    # scaling output
+                    dict_data['input'] = (dict_data['input'] - self.features_mean)/self.features_scale
                     dict_data['target'] = dict_data['target']*self.target_scale
                     
                     #scaling
-                    dict_data['input'] = dict_data['input'].to(torch.float16).squeeze()
-                    dict_data['target'] = dict_data['target'].to(torch.float16).squeeze()
-                    dict_data['mask'] = dict_data['mask'].to(torch.bool).squeeze()
+                    dict_data['input'] = dict_data['input'].to(torch.float16).squeeze(-1)
+                    dict_data['target'] = dict_data['target'].to(torch.float16).squeeze(-1)
+                    dict_data['mask'] = dict_data['mask'].to(torch.bool).squeeze(-1)
 
                     # dict_data = { k:v for k,v in dict_data.items() }
-                    idx += adj_iter_chunk_size
                     
-                    # converting from dictionary of keys, where each key contains info for all timesteps to
-                    # list of dicts where each dict contains all keys and info for one timestep
-                    if type(dict_data['input'])==tuple:
-                        li_dicts = [ {key:dict_data[key][idx].unsqueeze(0) if key!="li_locations" else dict_data[key][idx] for key in dict_data.keys()} for idx in range(len(dict_data['target'])) ]
-                      
-                    elif adj_iter_chunk_size==1:
-                        dict_data['idx_loc_in_region'] = dict_data['idx_loc_in_region'].squeeze(0)
-                        li_dicts = [ {k:v.unsqueeze(0) if k!="li_locations" else v for k,v in dict_data.items()} ]
-                        
-                    else:
-                        _ =  {k:v.unbind() if k!="li_locations" else v.tolist() for k,v in dict_data.items()} 
-                        li_dicts = [ {key:_[key][idx].unsqueeze(0) if key!="li_locations" else _[key][idx] for key in dict_data.keys() } for idx in range(len(dict_data['target'])) ]
-                    
+                                            
+                    li_dicts = [ {key:dict_data[key][i:i+1] if key not in ['li_locations','target_date_window'] else dict_data[key][i]
+                                  for key in dict_data.keys()} for i in range(len(dict_data['target'])) ]
+                                                                    
                     # shuffling data 
                     # unbundling weekly batches and shifting data forward n days 
                     # such that the weekly periods are different
-                    if self.shuffle and self.target_sub_idx_increment>0:
-                        li_dicts = self.cache_shuffle(li_dicts)
+                    if self.shuffle:
+                        # We adjust the start idx of model field and rain data
+                        # The amount to increment the target, e.g. number of days 
+                        target_sub_idx_increment = random.randint(0, self.dconfig.lookback_target)
+                        feature_sub_idx_increment = target_sub_idx_increment*4
+                        if target_sub_idx_increment>0:
+                            li_dicts = self.cache_shuffle(li_dicts, target_sub_idx_increment, feature_sub_idx_increment )
 
                     # Filter li_dicts that do not have any valid valuesju
                     li_dicts = [ dict_ for dict_ in li_dicts if dict_['mask'].logical_not().any()]
                     
+                    #idx += adj_iter_chunk_size
+                              
                     yield from li_dicts
                         
         else: 
             print("Note: User is using non cached dataset. The data will not be normalized automatically")
             sample_idx = 0
             # We calculate the maximum number of samples as the start_idx - end_idx // self.lookback for each generator
-            # sample_max_len = min( [ (gen.data_len_per_location)//gen.lookback for gen in [self.mf_data, self.rain_data]] )
-
+            
             if self.scaler_features == None: 
                 self.scaler_features = StandardScaler()
                 bool_update_scaler_features = True
@@ -1354,23 +1391,24 @@ class Era5EobsDataset(IterableDataset):
                 bool_update_scaler_target = False
             
             #Developing Data Cache and Scalers
-            for idx, ( (feature, feature_mask), (target, target_mask) ) in enumerate( zip( self.mf_data, self.rain_data)):
+            
+            for idx, ( (feature, feature_mask), (target, target_mask, target_date_window) ) in enumerate(zip(self.mf_data, self.rain_data)):
 
-                dict_data = self.preprocess_batch(feature, feature_mask, target, target_mask, normalize=False)
+                dict_data = self.preprocess_batch(feature, feature_mask, target, target_mask, target_date_window, normalize=False)
 
-                
                 if not self.cache_exists:
                     kwargs ={ 
                         "data_vars":{
-                                "input":( ("sample_idx","lookback_feature","h_feat","w_feat","d"), torch.concat(dict_data['input']).numpy() ),
+                                "input":( ("sample_idx","lookback_feat","h_feat","w_feat","d"), torch.concat(dict_data['input']).numpy() ),
                                 "target": ( ("sample_idx","lookback_target","h_target","w_target"),torch.concat(dict_data['target']).numpy() ),
                                 "mask": ( ("sample_idx","lookback_target","h_target","w_target"),torch.concat(dict_data['mask']).numpy() ),
                                 "idx_loc_in_region": ( ("sample_idx","h_w"), np.concatenate(dict_data['idx_loc_in_region']) ) ,
-                                "li_locations": ( ("sample_idx",'lookback_target'), np.asarray(sum( dict_data['li_locations'], [])) )
+                                "li_locations": ( ("sample_idx",'lookback_target'), np.asarray(sum( dict_data['li_locations'], [])) ),
+                                "target_date_window":( ("sample_idx",'lookback_target'), np.concatenate( dict_data['target_date_window'] ) )
                                 }
                             }
-                                           
-                    if idx==0 or os.path.exists(self.cache_path):
+                                         
+                    if idx==0:
                         
                         coords = {
                             "sample_idx": np.arange( torch.concat(dict_data['input']).shape[0] ),
@@ -1383,11 +1421,44 @@ class Era5EobsDataset(IterableDataset):
                             "w_target": np.arange( dict_data['target'][0].shape[-1]),
                             "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] )
                             }
+                        
                         kwargs['coords'] = coords
+                        
+                        #pass
                         xr_curr = xr.Dataset( **kwargs )
+                            
+                        if self.dconfig.memory_effecient == True:
 
-                    else:
+                            # Preventing Memory issues in case the file gets to big
+                            # Append to a netcd4 file on disk                                
+                            nd4_ds = nDataset(self.cache_path, 'w', )
+                            
+                            # Creating dimensions
+                            for dim_name, dim_value  in kwargs['coords'].items():
+                                if dim_name == 'sample_idx':
+                                    nd4_ds.createDimension( dim_name,  None )    
+                                else:
+                                    nd4_ds.createDimension( dim_name,  dim_value.shape[0] )
+                            
+                            # Inserting current values
+                            for val_name, tuple_shape_val in kwargs['data_vars'].items():
+                                
+                                arr = tuple_shape_val[1]
+                                if arr.dtype in [np.bool]:
+                                    arr = tuple_shape_val[1].astype(np.int16)
+                                if arr.dtype in ['<M8[ns]']:
+                                    arr = arr.astype(np.long)
 
+                                if val_name  in []: # ['input']:
+                                    nd4_ds.createVariable(val_name, arr.dtype, tuple_shape_val[0], zlib=True, complevel=1, shuffle=False  )
+                                else:
+                                    nd4_ds.createVariable(val_name, arr.dtype, tuple_shape_val[0] )
+                                
+                                nd4_ds[val_name][:] = arr
+                                                                                               
+                    elif idx!=0:
+                        
+                        #if self.dconfig.memory_effecient == False:
                         kwargs['coords'] = {
                             "sample_idx": np.arange( xr_curr.dims['sample_idx'], xr_curr.dims['sample_idx']+torch.concat(dict_data['input']).shape[0]),
 
@@ -1406,7 +1477,41 @@ class Era5EobsDataset(IterableDataset):
 
                         xr_new = xr.Dataset( **kwargs)
                         xr_curr = xr.concat( [ xr_curr, xr_new], dim="sample_idx", join="exact" )
-
+                        
+                        if self.dconfig.memory_effecient == True:
+                            
+                            if xr_curr.dims['sample_idx'] < 55000: #30000
+                                
+                                continue
+                                
+                            # clear xr_curr and cache current data to dataset    
+                            else:
+                                for k in kwargs['data_vars'].keys():
+                                    nd4_ds[k][ nd4_ds[k].shape[0]:, ...] = xr_curr[k].data
+                                
+                                # resetting the xr_curr 
+                                xr_curr = xr.Dataset(
+                                    coords={
+                                        "sample_idx": np.arange( 0 ),
+                                        "lookback_feat": np.arange( self.dconfig.lookback_feature),
+                                        "lookback_target": np.arange( self.dconfig.lookback_target),
+                                        "h_feat": np.arange( dict_data['input'][0].shape[-3]),
+                                        "w_feat": np.arange( dict_data['input'][0].shape[-2]),
+                                        "d": np.arange( dict_data['input'][0].shape[-1]),
+                                        "h_target": np.arange( dict_data['target'][0].shape[-2]),
+                                        "w_target": np.arange( dict_data['target'][0].shape[-1]),
+                                        "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] )
+                                        },
+                                    data_vars={                                
+                                            'input': (("sample_idx","lookback_feat","h_feat","w_feat","d"), np.zeros_like( np.concatenate(dict_data['input']))[:0]),
+                                            "target": (("sample_idx","lookback_target","h_target","w_target"), np.zeros_like( np.concatenate(dict_data['target']) )[:0] ),
+                                            "mask": (("sample_idx","lookback_target","h_target","w_target"), np.zeros_like( np.concatenate(dict_data['mask']))[:0]),
+                                            "idx_loc_in_region":(("sample_idx","h_w"), np.zeros_like( np.concatenate(dict_data['idx_loc_in_region']))[:0]),
+                                            "li_locations":(("sample_idx","lookback_target"), np.zeros_like( np.concatenate(dict_data['li_locations']))[:0] ),
+                                            "target_date_window": ( ("sample_idx",'lookback_target'),np.zeros_like( np.concatenate(dict_data['target_date_window']) )[:0] )
+                                        } )
+                                
+                                                            
                 if bool_update_scaler_features: 
                     # reshaping feature into ( num, dims) dimension required by partial_fit
                     dim = dict_data['input'][0].shape[-1]
@@ -1441,13 +1546,27 @@ class Era5EobsDataset(IterableDataset):
                 
                 else:
                     yield dict_data
-
+             
             if not self.cache_exists:
-                comp = dict(zlib=True, complevel=5)
-                encoding = {var: comp for var in xr_curr.data_vars}
-                xr_curr.to_netcdf(self.cache_path, mode='w', encoding=encoding )
                 
-    def cache_shuffle(self, li_dicts):
+                if self.dconfig.memory_effecient == True:
+                    for k in kwargs['data_vars'].keys():
+                        nd4_ds[k][ nd4_ds[k].shape[0]: , ...] = xr_curr[k].data
+                    
+                    # Now to set the length of the sample_idx dimension
+                    
+                    nd4_ds.close()
+                    
+                else:
+                    comp = dict(zlib=True, complevel=9)
+                    encoding = {var: comp for var in xr_curr.data_vars if var in ['input']}
+                    xr_curr.to_netcdf(self.cache_path, mode='w', encoding=encoding )
+                    a=1
+                
+            # Implement a scheme that saves the cache in chunks to prevent it getting too large for memory
+            # - check if you can append a array to one in memory without loding into RAM
+                
+    def cache_shuffle(self, li_dicts,  target_sub_idx_increment, feature_sub_idx_increment ):
         # shuffling data 
         # unbundling weekly batches and shifting data forward n days 
         # such that the weekly periods are different
@@ -1462,12 +1581,11 @@ class Era5EobsDataset(IterableDataset):
             loc_dict = OrderedDict()
 
             try:
-                location_data = [ dict_ for dict_ in li_dicts if all( (l == loc for l in dict_["li_locations"]) ) ]
+                location_data = [ dict_ for dict_ in li_dicts if all((l == loc for l in dict_["li_locations"])) ]
             except ValueError as e:
                 location_data = [ dict_ for dict_ in li_dicts if (dict_["li_locations"]==loc).all() ]
             
-            
-            if len(location_data) ==0: 
+            if len( location_data ) == 0: 
                 continue
 
             for key in keys:
@@ -1487,8 +1605,8 @@ class Era5EobsDataset(IterableDataset):
                     elif key in ['mask']:
                         key_data = torch.cat( [_dict[key].squeeze(0) for _dict in location_data], dim=0 )
                                             
-                else:
-                    key_data = [_dict[key] for _dict in location_data]
+                elif isinstance( li_dicts[0][key], list ):                    
+                    key_data = sum( [_dict[key] for _dict in location_data], [] )
                                 
                 loc_dict[key] = key_data
                     
@@ -1501,26 +1619,24 @@ class Era5EobsDataset(IterableDataset):
             for key in keys:
                 
                 if key in ['target','mask']:
-                    dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][self.target_sub_idx_increment:]
-                    d = dict_loc_unbundled[loc][key]
+                    d = dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][target_sub_idx_increment:]
                     l = len(d)-self.dconfig.lookback_target
                     dict_loc_batched[loc][key] = [ d[idx:idx+self.dconfig.lookback_target].unsqueeze(0) for idx in range(0, l, self.dconfig.lookback_target) ]
+                
+                elif key in ['li_locations','target_date_window']:
+                    d = dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][target_sub_idx_increment:]
+                    l = len(d)-self.dconfig.lookback_target
+                    dict_loc_batched[loc][key] = [ d[idx:idx+self.dconfig.lookback_target] for idx in range(0, l, self.dconfig.lookback_target) ]
 
                 elif key in ['idx_loc_in_region']:
                     # idx_loc_in_region only has one value per lookback_target.
-                    s_dix = round( self.target_sub_idx_increment/self.dconfig.lookback_target )
+                    s_dix = round( target_sub_idx_increment/self.dconfig.lookback_target )
                     d = dict_loc_unbundled[loc][key][s_dix:]
                     l = len(d)
                     dict_loc_batched[loc][key] = [ d[idx:idx+1] for idx in range(0, l, 1) ]
 
-                elif key in ['li_locations']:
-                    s_dix = round( self.target_sub_idx_increment/self.dconfig.lookback_target )
-                    d = dict_loc_unbundled[loc][key][s_dix:]
-                    l = len(d)
-                    dict_loc_batched[loc][key] = [ d[idx:idx+1] for idx in range(0,l,1) ]
-
                 elif key in ['input']:
-                    dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][self.feature_sub_idx_increment:]
+                    dict_loc_unbundled[loc][key] = dict_loc_unbundled[loc][key][feature_sub_idx_increment:]
                     d = dict_loc_unbundled[loc][key]
                     l = len(d)-self.dconfig.lookback_feature
                     dict_loc_batched[loc][key] = [ d[idx:idx+self.dconfig.lookback_feature].unsqueeze(0) for idx in range(0, l, self.dconfig.lookback_feature) ]
@@ -1530,22 +1646,22 @@ class Era5EobsDataset(IterableDataset):
         
         # Creating a list of dicts structure - where each dict contains data for one 7 day period
         for key in keys:
-            
-            if key in ['target','mask']:
-                li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
-            elif key in ['input']:
-                li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
-            elif key in ['idx_loc_in_region']:
-                li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
-            elif key == ['li_locations']:
-                li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
+            li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
+            # if key in ['target','mask']:
+            #     li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
+            # elif key in ['input']:
+            #     li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
+            # elif key in ['idx_loc_in_region']:
+            #     li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
+            # elif key == ['li_locations']:
+            #     li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
 
             for idx in range(count):
                 li_dicts_shuffled[idx][key] = li_datums[idx]
         
         return li_dicts_shuffled
 
-    def preprocess_batch(self, feature, feature_mask, target, target_mask, normalize=True):
+    def preprocess_batch(self, feature, feature_mask, target, target_mask, target_date_window, normalize=True):
         
         # Converting to tensors
         feature = torch.as_tensor(feature)
@@ -1555,24 +1671,25 @@ class Era5EobsDataset(IterableDataset):
 
         # Preparing feature model fields
         # unbatch
-        feature = feature.view(-1, self.dconfig.lookback_feature, *feature.shape[-3:] ) # ( bs*feat_days ,h, w, shape_feat)
-        feature_mask = feature_mask.view(-1, self.dconfig.lookback_feature,*feature.shape[-3:] ) # ( bs*feat_days ,h, w, shape_dim)
+        feature = feature.view(-1, self.dconfig.lookback_feature, *feature.shape[-3:] ) # ( bs/feat_lookback, feat_days ,h, w, shape_dim)
+        feature_mask = feature_mask.view(-1, self.dconfig.lookback_feature,*feature.shape[-3:] ) # ( bs/feat_lookback ,h, w, shape_dim)
         
         if normalize:
-            feature = (feature-self.feature_mean )/self.featurses_scale
+            feature = (feature-self.feature_mean )/self.features_scale
         feature.masked_fill_( feature_mask, self.dconfig.mask_fill_value['model_field'])
 
         # Preparing Eobs and target_rain_data
         target = target.view(-1, self.dconfig.lookback_target, *target.shape[-2:] ) #( bs, target_periods ,h1, w1, target_dim)
         target_mask = target_mask.view(-1, self.dconfig.lookback_target, *target.shape[-2:] )#( bs*target_periods ,h1, w1, target_dim)
-
+        target_date_window = target_date_window.reshape( (-1,self.dconfig.lookback_target  ) )
+        
         if normalize:
             target = target*self.target_scale
         target.masked_fill_(target_mask, self.dconfig.mask_fill_value['rain'] )
 
-        li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs = self.location_extractor( feature, target, target_mask, self.locations)
+        li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs, li_target_date_window = self.location_extractor( feature, target, target_mask, self.locations, target_date_window )
         
-        dict_data = { k:v for k,v in zip(['input','target','mask','idx_loc_in_region','li_locations'], [li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs] ) }
+        dict_data = { k:v for k,v in zip(['input','target','mask','idx_loc_in_region','li_locations','target_date_window'], [li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs, li_target_date_window] ) }
         return dict_data
 
     def get_idx(self, date:Union[np.datetime64,str]):
@@ -1599,7 +1716,7 @@ class Era5EobsDataset(IterableDataset):
 
         return feat_idx, tar_idx
 
-    def location_extractor(self, feature, target, target_mask, locations):
+    def location_extractor(self, feature, target, target_mask, locations, target_date_window ):
         """Extracts the temporal slice of patches corresponding to the locations of interest 
 
                 Args:
@@ -1618,21 +1735,41 @@ class Era5EobsDataset(IterableDataset):
 
             #Convert to string format            
             li_hw_idxs_str = [ str(hw_idxs) for hw_idxs in li_hw_idxs ]
-            #li_locs = np.repeat(li_hw_idxs_str, len(target) )
-            li_locs = [[[loc]*target.shape[1]]*target.shape[0] for loc in li_hw_idxs_str] 
-
-        else:
+            
+            locations_ = copy.deepcopy(li_hw_idxs_str)
+        
+        elif locations[0] in Generator.get_locs_for_whole_map(self.dconfig):
+            li_hw_idxs = copy.deepcopy(locations)
+            #Convert to string format            
+            li_hw_idxs_str = [ str(hw_idxs) for hw_idxs in li_hw_idxs ]
+            
+            locations_ = li_hw_idxs_str
+        
+        elif isinstance( locations[0], string_classes ):
             li_hw_idxs = [ self.rain_data.find_idx_of_loc_region( _loc, self.dconfig ) for _loc in locations ] #[ (h_idx,w_idx), ... ]
             #li_locs = np.repeat(locations, len(target) )
-            li_locs = [[[loc]*target.shape[1]]*target.shape[0] for loc in locations] 
-
+            locations_ = copy.deepcopy(locations)           
+        
         # Creating seperate datasets for each location
-        li_feature, li_target, li_target_mask = zip(*[self.select_region( feature, target, target_mask, hw_idxs[0], hw_idxs[1] ) for hw_idxs in li_hw_idxs ] )
+        li_feature, li_target, li_target_mask = zip(*[self.select_region(feature, target, target_mask, hw_idxs[0], hw_idxs[1]) for hw_idxs in li_hw_idxs ] )
+                
 
+        
+        lcs = locations_ 
+        lit = li_target
+        li_locs = [
+                    [
+                        lcs[i:i+1]*lit[i].shape[1]
+                    ]*lit[i].shape[0] 
+                    for i in range(len(lit))
+                   ]
+                # li_target_date_window= np.tile( target_date_window[np.newaxis, ...], ( len(lit), 1, 1) )
+        li_target_date_window = [target_date_window]*len(lit)
+        
         # pair of indexes locating the central location within the grid region extracted for any location
         idx_loc_in_region = [ np.floor_divide( self.dconfig.outer_box_dims, 2)[np.newaxis,...] ]*len( torch.concat(li_feature) ) #This specifies the index of the central location of interest within the (h,w) patch    
         
-        return li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs
+        return li_feature, li_target, li_target_mask, idx_loc_in_region, li_locs, li_target_date_window
     
     def select_region( self, mf, rain, rain_mask, h_idxs, w_idxs):
         """ Extract the region relating to a [h_idxs, w_idxs] pair
@@ -1688,7 +1825,7 @@ class Era5EobsDataset(IterableDataset):
         with xr.open_dataset( self.cache_path, cache=True ) as xr_cache:
             # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
             if not hasattr(self,'max_cache_len'):
-                self.max_cache_len = xr_cache["sample_idx"].shape[0]
+                self.max_cache_len = xr_cache["target"].shape[0]
 
         # Making sure its a multiple of lookback away from start idx
         if not hasattr(self,'cache_start_idx'):
@@ -1726,7 +1863,7 @@ class Era5EobsDataset(IterableDataset):
         else:
             # Changing the start_idx and end_idx in the underlying generators
             mf_data_len_per_location = ds.mf_data.start_idx - ds.mf_data.end_idx
-            per_worker_per_location = mf_data_len_per_location//worker_count 
+            per_worker_per_location = mf_data_len_per_location//worker_count
             ds.mf_data.start_idx = worker_id*per_worker_per_location
             ds.mf_data.end_idx = (worker_id+1)*per_worker_per_location
             ds.mf_data.data_len_per_worker = per_worker_per_location * ds.loc_count
@@ -1736,7 +1873,7 @@ class Era5EobsDataset(IterableDataset):
             ds.rain_data.start_idx = worker_id*per_worker_per_location
             ds.rain_data.end_idx = (worker_id+1)*per_worker_per_location
             ds.rain_data.data_len_per_worker = per_worker_per_location * ds.loc_count
-
+        
     @staticmethod
     def parse_data_args(parent_parser=None, ):
         
@@ -1757,11 +1894,11 @@ class Era5EobsDataset(IterableDataset):
         parser.add_argument("--rain_fn", default="eobs_true_rainfall_197901-201907_uk.nc", type=str)
         parser.add_argument("--mf_fn", default="model_fields_linearly_interpolated_1979-2019.nc", type=str)
 
-        parser.add_argument("--vertical_shift", type=int, default=1)
-        parser.add_argument("--horizontal_shift", type=int, default=1)
+        parser.add_argument("--vertical_shift", type=int, default=4)
+        parser.add_argument("--horizontal_shift", type=int, default=4)
 
-        parser.add_argument("--outer_box_dims", default=[1,1], type=tuple_type)
-        parser.add_argument("--inner_box_dims", default=[1,1], type=tuple_type)
+        parser.add_argument("--outer_box_dims", default=[16,16], type=tuple_type)
+        parser.add_argument("--inner_box_dims", default=[4,4], type=tuple_type)
 
         parser.add_argument("--lookback_target", type=int, default=7)
         # parser.add_argument("--target_range", nargs='+', default=[0,4])
@@ -1776,9 +1913,11 @@ class Era5EobsDataset(IterableDataset):
         parser.add_argument("--test_end", type=str, default="2019-07")
 
         parser.add_argument("--min_rain_value", type=float, default=0.5)
-        parser.add_argument("--gen_size", type=int, default=60, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
-
+        parser.add_argument("--gen_size", type=int, default=8, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--cache_gen_size", type=int, default=4, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
         parser.add_argument("--shuffle", type=lambda x: bool(int(x)), default=True, choices=[0,1] )
+        parser.add_argument("--memory_effecient", type=lambda x: bool(int(x)), default=False, choices=[0,1] )
+        
         dconfig = parser.parse_known_args()[0]
         dconfig.locations = sorted(dconfig.locations)
         dconfig.locations_test = sorted(dconfig.locations_test)
@@ -1818,9 +1957,38 @@ class Era5EobsDataset(IterableDataset):
         test_start_date = np.datetime64(dconfig.test_start,'D')
         test_end_date = (pd.Timestamp(dconfig.test_end) - pd.DateOffset(seconds=1) ).to_numpy()
 
+        if dconfig.locations[0][:13] == "WholeMapSplit":
+            all_hw_idxs = Generator.get_locs_for_whole_map(dconfig)
+            
+            train_prop, test_prop = dconfig.locations[0][14:].split('_')
+            train_prop = float(train_prop)/100
+            test_prop = float(test_prop)/100
+            
+            train_count = int( len(all_hw_idxs) * train_prop )
+            test_count = int( len(all_hw_idxs) * test_prop )
+
+            #For reproducibility
+            random.seed(24)
+            train_test_group = random.sample( all_hw_idxs , train_count + test_count ) 
+            random.seed(24)
+            random.shuffle(train_test_group)
+                        
+            train_group, test_group = train_test_group[:train_count], train_test_group[ train_count: ]
+            
+            dconfig.locations = train_group
+            dconfig.locations_test = test_group
+            
+        elif dconfig.locations[0] == "All_Cities":
+            dconfig.locations = sorted( list( Generator.city_latlon.keys() ) )
+                                          
+
+        if dconfig.locations_test[0] == "All_Cities":
+            dconfig.locations_test = sorted( list( Generator.city_latlon.keys() ) )
+
+
         loc_count = len(dconfig.locations)  if \
                     dconfig.locations != ["All"] else \
-                    len( Generator.get_locs_for_whole_map(dconfig))
+                    len( Generator.get_locs_for_whole_map(dconfig) )
 
         loc_count_test = loc_count \
                             if not dconfig.locations_test \
@@ -1841,13 +2009,7 @@ class Era5EobsDataset(IterableDataset):
 
         dconfig.test_set_size_elements = ( np.timedelta64(test_end_date - test_start_date,'D')  // dconfig.window_shift  ).astype(int)               
         dconfig.test_set_size_elements *= loc_count_test
-        
-        if dconfig.locations[0] == "All_Cities":
-            dconfig.locations = sorted( list( Generator.city_latlon.keys() ) )
-
-        if dconfig.locations_test[0] == "All_Cities":
-            dconfig.locations_test = sorted( list( Generator.city_latlon.keys() ) )
-        
+               
 
         return dconfig
 

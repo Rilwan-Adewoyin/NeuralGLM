@@ -392,8 +392,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             
             ll = A + B + C
 
-        #------------- Version 3 - using 0<j<=J and jensens inequality to convert log(sum(Wj)) to sum(log(Wj))
-        
+        #------------- Version 3 (ADE)- using 0<j<=J and jensens inequality to convert log(sum(Wj)) to sum(log(Wj))
         elif self.cp_version == 3:
             j=self.j
             A = torch.log(L.pow(-1))

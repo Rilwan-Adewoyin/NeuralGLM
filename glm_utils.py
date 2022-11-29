@@ -315,8 +315,7 @@ def default_collate_concat(batch):
         res =  torch.concat( batch, 0 )
         return res
     
-    elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
-            and elem_type.__name__ != 'string_':
+    elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' and elem_type.__name__ != 'string_':
         if elem_type.__name__ == 'ndarray' or elem_type.__name__ == 'memmap':
             # array of string classes and object
             if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
@@ -338,19 +337,22 @@ def default_collate_concat(batch):
     elif isinstance(elem, collections.abc.Sequence):
         # check to make sure that the elements in batch have consistent size
         it = iter(batch)
-        elem_size = len(next(it))
+        elem = next(it)
+        elem_size = len(elem)
         if not all(len(elem) == elem_size for elem in it):
             raise RuntimeError('each element in list of batch should be of equal size')
         
-        # Handling locations case e.g. list of list of strings
-        if isinstance(next(iter(elem)), string_classes):
-            sequence = batch
+        if type(elem) == list and (isinstance(next(iter(elem)), string_classes) or type(next(iter(elem))).__name__ == 'datetime') :
+            
+            return batch
+
         else:           
             transposed = list(zip(*batch))  # It may be accessed twice, so we use a list.
             sequence = transposed
             
         if isinstance(elem, tuple):
-            return [default_collate_concat(samples) for samples in sequence]  # Backwards compatibility.
+            outp = [default_collate_concat(samples) for samples in sequence]  # Backwards compatibility.
+            return outp
         else:
             try:
                 return elem_type([default_collate_concat(samples) for samples in sequence])

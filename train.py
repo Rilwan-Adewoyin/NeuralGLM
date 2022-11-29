@@ -1,5 +1,9 @@
-from dataloaders import ToyDataset, AustraliaRainDataset,Era5EobsDataset, MAP_NAME_DSET
 import torch
+import xarray as xr
+
+from netCDF4 import Dataset as nDataset
+from dataloaders import ToyDataset, AustraliaRainDataset,Era5EobsDataset, MAP_NAME_DSET
+
 from torch.nn import functional as F
 from torch import nn
 import numpy as np
@@ -69,16 +73,22 @@ pl.core.saving.load_hparams_from_yaml = load_hparams_from_yaml
 
 def train( train_args, data_args, glm_args, model_args ):
     # Define the trainer    
+    root_dir = train_args.ckpt_dir if train_args.ckpt_dir else ''
+    dir_model = os.path.join(root_dir,"Checkpoints",f"{train_args.exp_name}/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
+    
+    # Adjusting val_check_interval
+    if train_args.dataset == "uk_rain" and type(train_args.val_check_interval) == float and int(train_args.val_check_interval)!=train_args.val_check_interval:
+        train_args.val_check_interval = int( train_args.val_check_interval * (data_args.train_set_size_elements // train_args.batch_size ) )
+        
     trainer = pl.Trainer(gpus=train_args.gpus,
-                        default_root_dir = f"Checkpoints/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
-                        callbacks =[EarlyStopping(monitor="val_loss/loss", patience=3 if data_args.locations!=["All"] else 2 ),
+                        default_root_dir = dir_model,
+                        callbacks =[EarlyStopping(monitor="val_loss/loss", patience=4 if data_args.locations!=["All"] else 4 ),
                                         ModelCheckpoint(
                                             monitor="val_loss/loss",
                                             filename='{epoch}-{step}-{val_loss/loss:.3f}-{val_metric/mse_rain:.3f}',
                                             save_last=False,
                                             auto_insert_metric_name=True,
-                                            save_top_k=1)
-                                            ],
+                                            save_top_k=1)],
                         enable_checkpointing=True,
                         precision=16,
                         max_epochs=train_args.max_epochs,
@@ -124,6 +134,7 @@ def train( train_args, data_args, glm_args, model_args ):
                                                                         target_distribution_name=glm_args.target_distribution_name,
                                                                         target_range=glm_args.target_range,
                                                                         gen_size=data_args.gen_size,
+                                                                        cache_gen_size = data_args.cache_gen_size,                             
                                                                         workers = train_args.workers,
                                                                         trainer_dir=trainer.logger.log_dir )
         cf = glm_utils.default_collate_concat
@@ -134,40 +145,36 @@ def train( train_args, data_args, glm_args, model_args ):
         
             # Shuffling Datasetes
 
-        if data_args.shuffle:
-            buffer_size = ds_train.loc_count*(4*12) 
-            buffer_size = buffer_size if not train_args.debugging else 5
-            ds_train_iter = IterableWrapperIterDataPipe(ds_train, deepcopy=False)
-
-            ds_train = ShufflerIterDataPipe(ds_train_iter, 
-                            #HERE adjust data length to factor in other locations ont just 1
-                            buffer_size=buffer_size, #Each datum represents 7 days long
-                            unbatch_level=0)
-
     else:
         raise NotImplementedError
 
+    torch.set_num_threads(1)
     # Create the DataLoaders    
-    dl_train =  DataLoader(ds_train, train_args.batch_size, shuffle=data_args.shuffle,
-                            num_workers=train_args.workers, drop_last=False,
+    dl_train =  DataLoader(ds_train, train_args.batch_size,
+                            num_workers=train_args.workers,
+                            drop_last=False,
                             pin_memory=True,
                             collate_fn=cf, 
                             worker_init_fn=worker_init_fn,
-                            persistent_workers=train_args.workers>0 )
+                            persistent_workers=train_args.workers>0,
+                            timeout=600)
 
-    dl_val = DataLoader(ds_val, train_args.batch_size, shuffle=False, 
+    dl_val = DataLoader(ds_val, train_args.batch_size, 
                             num_workers=train_args.workers,
                             drop_last=False, collate_fn=cf,
                             pin_memory=True,
                             worker_init_fn=worker_init_fn,
-                            persistent_workers=train_args.workers>0)
+                            persistent_workers=train_args.workers>0,
+                            timeout=600)
 
     dl_test = DataLoader(ds_test, train_args.batch_size, 
-                            shuffle=False,
                             num_workers=train_args.workers,
                             drop_last=False, collate_fn=cf, 
                             pin_memory=True,
-                            worker_init_fn=worker_init_fn)
+                            worker_init_fn=worker_init_fn,
+                            prefetch_factor=1,
+                            timeout=600,
+                            persistent_workers=train_args.workers>0)
     
 
     # Load GLM Model
@@ -215,14 +222,14 @@ def train( train_args, data_args, glm_args, model_args ):
 
 def test( train_args, data_args, glm_args ):
 
-    _dir  = os.path.join(
-        f"Checkpoints/{train_args.exp_name}/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}",
-        "lightning_logs",f"version_{train_args.test_version}")
-
-    hparams_path = os.path.join( _dir, "hparams.yaml")
-    checkpoint_path = next( ( elem for elem in glob.glob(os.path.join( _dir, "checkpoints", "*")) 
+    root_dir = train_args.ckpt_dir if train_args.ckpt_dir else ''
+    dir_model = os.path.join(root_dir, f"Checkpoints/{train_args.exp_name}/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
+    dir_model_version = os.path.join(dir_model, "lightning_logs",f"version_{train_args.test_version}")
+        
+    hparams_path = os.path.join( dir_model_version, "hparams.yaml")
+    checkpoint_path = next( ( elem for elem in glob.glob(os.path.join( dir_model_version, "checkpoints", "*")) 
                                 if elem[-4:]=="ckpt"))
-    scaler_features, scaler_target = NeuralDGLM.load_scalers( os.path.join( _dir) )
+    scaler_features, scaler_target = NeuralDGLM.load_scalers( os.path.join( dir_model_version) )
 
     #Loading state
     glm_class = MAP_NAME_GLM[train_args.glm_name]
@@ -236,7 +243,8 @@ def test( train_args, data_args, glm_args ):
                         enable_checkpointing=not train_args.debugging,
                         logger=False,
                         gpus=train_args.gpus,
-                        default_root_dir = os.path.join("Checkpoints",train_args.exp_name,"{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
+                        default_root_dir = dir_model_version
+                        )
 
     # Making Dset
     if train_args.dataset == "uk_rain":
@@ -265,18 +273,23 @@ if __name__ == '__main__':
     train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
     train_parser.add_argument("--exp_name", default='default', type=str )        
     train_parser.add_argument("--gpus", default=1)
-    train_parser.add_argument("--sample_size", default=1000)
-    train_parser.add_argument("--dataset", default="australia_rain", choices=["toy","australia_rain","uk_rain"])
-    train_parser.add_argument("--nn_name", default="HLSTM", choices=["MLP","HLSTM","HLSTM_tdscale", "HConvLSTM_tdscale"])
+    train_parser.add_argument("--sample_size", default=100)
+    train_parser.add_argument("--dataset", default="uk_rain", choices=["toy","australia_rain","uk_rain"])
+    train_parser.add_argument("--nn_name", default="HConvLSTM_tdscale", choices=["MLP","HLSTM","HLSTM_tdscale", "HConvLSTM_tdscale"])
     train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
-    train_parser.add_argument("--max_epochs", default=500, type=int)
-    train_parser.add_argument("--batch_size", default=16, type=int)
+    train_parser.add_argument("--max_epochs", default=100, type=int)
+    train_parser.add_argument("--batch_size", default=24, type=int)
     train_parser.add_argument("--debugging",action='store_true' )
-    train_parser.add_argument("--workers",default=8, type=int )
+    train_parser.add_argument("--workers", default=2, type=int )
+    train_parser.add_argument("--cache_workers", default=4, type=int )
+    
+    
     train_parser.add_argument("--test_version",default=None, type=int, required=False ) #TODO: implelment logic such that a trained model can just be tested on a given dataset
     train_parser.add_argument("--val_check_interval", default=1.0, type=float)
-    train_parser.add_argument("--prefetch",type=int, default=4, help="Number of batches to prefetch" )
+    train_parser.add_argument("--prefetch",type=int, default=2, help="Number of batches to prefetch" )
     train_parser.add_argument("--hypertune",type=bool, default=False)
+    train_parser.add_argument("--ckpt_dir",type=str, default='')
+    
     
     train_args = train_parser.parse_known_args()[0]
     

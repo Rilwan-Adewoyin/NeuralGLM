@@ -7,6 +7,7 @@ from torch import nn
 from glm_utils import GLMMixin
 from transformers.optimization import Adafactor, AdafactorSchedule
 import pickle
+from collections import defaultdict
 import os
 from better_lstm import LSTM
 import einops
@@ -178,7 +179,12 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             inp = batch['input']
             target_rain_value_scaled = batch['target']
             target_did_rain = torch.where( target_rain_value_scaled > 0.5*self.target_scale, 1.0, 0.0 )
-            mask = ~batch.get('mask',None)
+            mask = batch.get('mask',None)
+            if mask is not None:
+                if mask.dtype is not torch.bool:
+                    mask = mask.to(torch.bool)
+                mask = ~mask
+                
             idx_loc_in_region = batch.get('idx_loc_in_region',None)
             
             # Predicting
@@ -358,6 +364,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
         if self.task == "uk_rain": 
             output['li_locations'] = batch.pop('li_locations',None)
+            output['target_date_window'] = batch.pop('target_date_window',None)
                         
         return output
 
@@ -373,6 +380,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         #target data
         target_did_rain = torch.cat( [output['target_did_rain'] for output in outputs], dim=0 )
         target_rain_value = torch.cat( [output['target_rain_value'] for output in outputs], dim=0 )
+        target_date_window = np.concatenate([output['target_date_window'] for output in outputs] )
         
         pred_mu = pred_mu.cpu().to(torch.float16).numpy()
         pred_disp = pred_disp.cpu().to(torch.float16).numpy()
@@ -386,7 +394,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             locations = [ ds.location for ds in test_dl.dataset.datasets]
             cumulative_sizes = [0] + test_dl.dataset.cumulative_sizes
             
-            dict_location_data = {}
+            dict_loc_data = {}
             for idx, loc in enumerate(locations):
                 if cumulative_sizes==0:
                     continue
@@ -399,26 +407,26 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                 
                 date_windows = [ dates[idx-lookback:idx] for idx in indexes_filtrd[lookback: ] ]
 
-                data = {'pred_mu':pred_mu_unscaled[s_idx:e_idx],
-                        'pred_disp':pred_disp_unscaled[s_idx:e_idx],
+                data = {'pred_mu':pred_mu[s_idx:e_idx],
+                        'pred_disp':pred_disp[s_idx:e_idx],
                         'target_did_rain':target_did_rain[s_idx:e_idx],
-                        'target_rain_value':target_rain_unscaled[s_idx:e_idx],
+                        'target_rain_value':target_rain_value[s_idx:e_idx],
                         'date':date_windows }
                 
-                data['pred_p'] = pred_p_unscaled[s_idx:e_idx]
+                data['pred_p'] = pred_p[s_idx:e_idx]
 
-                dict_location_data[loc] = data
+                dict_loc_data[loc] = data
 
             dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
             file_path = os.path.join( dir_path, "test_output.pkl" ) 
             with open( file_path, "wb") as f:
-                pickle.dump( dict_location_data, f )
+                pickle.dump( dict_loc_data, f )
         
         elif self.task == "uk_rain":
 
             dconfig = test_dl.dataset.dconfig
                         
-            dict_location_data = OrderedDict()
+            dict_loc_data = defaultdict(dict)
             lookback = dconfig.lookback_target
 
             mask = torch.cat( [ output['mask'] for output in outputs], dim=0 )
@@ -428,20 +436,23 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             pred_mu = pred_mu.reshape(-1, *pred_mu.shape[2:] )
             pred_disp = pred_disp.reshape(-1, *pred_disp.shape[2:] )
             pred_p = pred_p.reshape(-1, *pred_p.shape[2:] )
-            idx_loc_in_region = idx_loc_in_region.repeat(dconfig.lookback_target,0).shape
+            idx_loc_in_region = idx_loc_in_region.repeat(dconfig.lookback_target,0)
             target_did_rain =target_did_rain.reshape(-1, *target_did_rain.shape[2:] )
             target_rain_value = target_rain_value.reshape(-1, *target_rain_value.shape[2:] )
             mask = mask.reshape(-1, *mask.shape[2:] )
+            target_date_window = target_date_window.reshape(-1 )
             locations = sum( sum( [output['li_locations'] for output in outputs], []), [] )
             
             #Determining the start and end index for each location's portion of the dataset   
-
 
             #Assuming we consider predictions in blocks of 7 (lookback) the below marks every seventh block of predictions where i is where new data for where location starts
             start_idxs_for_location_subset = [ (idx,loc) for idx,loc in enumerate(locations) if (idx==0 or loc!=locations[idx-1]) ]
             end_idxs_for_location_subset = start_idxs_for_location_subset[1:] + [ (len(locations), "End") ] 
 
             assert end_idxs_for_location_subset[-1][0] == pred_mu.shape[0], "The final end idxs should be the same as the length of the overall dataset"
+            
+            
+            dict_loc_li_data = defaultdict(dict)
             
             for idx  in range( len( start_idxs_for_location_subset)-1 ):
 
@@ -450,36 +461,45 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                 e_idx = end_idxs_for_location_subset[idx][0]
 
                 # Need to concat data for each city
-                s_idx_adj = s_idx
-                e_idx_adj = e_idx
+                datum_start_date = dconfig.test_start if (loc not in dict_loc_data.keys()) else ( dict_loc_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
 
-                datum_start_date = dconfig.test_start if (loc not in dict_location_data) else ( dict_location_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
-                date_windows = pd.date_range( start=datum_start_date, periods=(e_idx-s_idx), freq='D', normalize=True )
-
-                data = {'pred_mu':pred_mu[s_idx:e_idx],
+                data = {
+                    'pred_mu':pred_mu[s_idx:e_idx],
                         'pred_disp':pred_disp[s_idx:e_idx],
                         'target_did_rain':target_did_rain[s_idx:e_idx],
                         'target_rain_value':target_rain_value[s_idx:e_idx],
-                        'date':np.asarray( date_windows ),
+                        'date':target_date_window[s_idx:e_idx],
                         'pred_p': pred_p[s_idx:e_idx],
                         'mask':mask[s_idx:e_idx],
                         'idx_loc_in_region': idx_loc_in_region[s_idx:e_idx] }
-                
-                if loc not in dict_location_data:
-                    dict_location_data[loc] = data
-                
-                else:
-                    for key in dict_location_data[loc].keys():
-                        dict_location_data[loc][key] = np.concatenate( 
-                            (dict_location_data[loc][key], data[key]) )
 
+                # For each location store  a list of the data predictions
+                if loc not in dict_loc_li_data:
+                    dict_loc_li_data[loc] = [data]
+                else:
+                    dict_loc_li_data[loc].append(data)
+                
+            # Now concatenating all the predictions along time axis for each location
+            # Also sorting predictions
+            saved_feature_names = next( iter(dict_loc_li_data[loc] )).keys()
+            for loc in dict_loc_li_data.keys():
+                
+                li_dates = np.concatenate( tuple( d['date'] for d in  dict_loc_li_data[loc] ) ) 
+                ordered_idxs = np.argsort( li_dates )
+                
+                for k in saved_feature_names:
+                    
+                    array =  np.concatenate( tuple(d[k] for d in dict_loc_li_data[loc] ) )
+                    array_sorted = array[ordered_idxs]
+                    dict_loc_data[loc][k] = array
+                                   
             dir_path = os.path.dirname( os.path.dirname( self.trainer.resume_from_checkpoint ) )  if self.trainer.resume_from_checkpoint else self.trainer.log_dir
 
             #add teststart_testend to end of test_output.pkl and summary.json fns
             suffix = f"{dconfig.test_start}_{dconfig.test_end}"
             file_path = os.path.join( dir_path, f"test_output_{suffix}.pkl" ) 
             with open( file_path, "wb") as f:
-                pickle.dump( dict_location_data, f )
+                pickle.dump( dict_loc_data, f )
             
             # Recording losses on test set and summarised information about test run
             summary = {
@@ -509,7 +529,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                                 warmup_init=True,
                                 lr=None, 
                                 beta1=self.beta1,
-                                clip_threshold=0.5)
+                                clip_threshold=1.0)
         
         lr_scheduler = AdafactorSchedule(optimizer)
         # lr_scheduler = get_constant_schedule_with_warmup( optimizer, num_warmup_steps=1000, last_epoch=-1)
@@ -557,7 +577,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             parents=[parent_parser], add_help=True, allow_abbrev=False)
         parser.add_argument("--target_distribution_name", default="compound_poisson")
 
-        parser.add_argument("--beta1", type=float, default=None )
+        parser.add_argument("--beta1", type=float, default=0.2 )
 
         parser.add_argument("--mu_distribution_name", default="normal")
         parser.add_argument("--mu_link_name", default="identity",help="name of link function used for mu distribution")
@@ -572,7 +592,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
 
 
-        parser.add_argument("--pos_weight", default=1.1, type=float ,help="The relative weight placed on examples where rain did occur when calculating the loss")
+        parser.add_argument("--pos_weight", default=1.2, type=float ,help="The relative weight placed on examples where rain did occur when calculating the loss")
         parser.add_argument("--pixel_sample_prop", default=0.7, type=float ,help="")
 
         # Compound Poisson arguments
