@@ -15,8 +15,13 @@ Checkpoints_all/*
 Checkpoints_all_cities/*
 *zip
 
+
 #Shell scripts
-# *.sh
+experiment_scripts/*
+*.sh
 
 # Jupyter
 *.ipynb*
+
+# Other
+trainer_convCNPClimate.py

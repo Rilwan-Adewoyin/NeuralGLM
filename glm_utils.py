@@ -343,7 +343,7 @@ def default_collate_concat(batch):
             raise RuntimeError('each element in list of batch should be of equal size')
         
         if type(elem) == list and (isinstance(next(iter(elem)), string_classes) or type(next(iter(elem))).__name__ == 'datetime') :
-            
+            # return sum(batch, [])
             return batch
 
         else:           

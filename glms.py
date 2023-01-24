@@ -1,7 +1,7 @@
 from dataloaders import Era5EobsDataset
 from typing import Union
 import torch
-from torch._C import Value
+# from torch._C import Value
 # from torch.optim import lr_scheduler
 from torch import nn
 from glm_utils import GLMMixin
@@ -10,10 +10,9 @@ import pickle
 from collections import defaultdict
 import os
 from better_lstm import LSTM
-import einops
+# import einops
 import pytorch_lightning as pl
-from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures, StandardScaler
-import torchtyping
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import argparse
 from neural_nets import MAP_NAME_NEURALMODEL
 from pytorch_lightning.utilities.types import EPOCH_OUTPUT
@@ -24,9 +23,11 @@ from typing import Dict, Any
 import json
 import pandas as pd
 import numpy as np
-import torch_optimizer as optim
+# import torch_optimizer as optim
 from transformers import get_constant_schedule_with_warmup
-from collections import OrderedDict
+# from collections import OrderedDict
+import gc
+from copy import deepcopy
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
 from  glm_utils import tuple_type
@@ -147,109 +148,82 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         return output
 
     def step(self, batch, step_name ):
-        
-        # Generating predictions
-        if self.task in ["toy","australia_rain"]:
-            #TODO: Check this pipeline still works
-            inp, target = batch
-            target_did_rain, target_rain_value = torch.unbind(target,-1)
 
-            output  = self.forward(inp)
-            pred_mu = output['mu']
-            pred_disp = output['disp']
-            pred_logits = output['logits']
-            pred_p = output['p']
-
-            # Calculating Losses
-            loss, composite_losses = self.loss_fct( target_rain_value, target_did_rain, pred_mu, 
-                                        pred_disp, logits=pred_logits, p=pred_p, global_step=self.global_step
-                                         )
-
-            #Unscaling predictions
-            # A
-            pred_mu_unscaled, pred_disp_unscaled, pred_p_unscaled = self.target_distribution.unscale_distribution( 
-                                                        pred_mu.detach(), pred_disp.detach(),
-                                                        pred_p.detach(), self.scaler_target )
-
-            raise NotImplementedError("Not Implemented the Australian rain tests")
-        
-        elif self.task in ["uk_rain"]:
-                       
-            #For the case of UK Eobs dset
-            inp = batch['input']
-            target_rain_value_scaled = batch['target']
-            target_did_rain = torch.where( target_rain_value_scaled > 0.5*self.target_scale, 1.0, 0.0 )
-            mask = batch.get('mask',None)
-            if mask is not None:
-                if mask.dtype is not torch.bool:
-                    mask = mask.to(torch.bool)
-                mask = ~mask
-                
-            idx_loc_in_region = batch.get('idx_loc_in_region',None)
+        #For the case of UK Eobs dset
+        inp = batch['input']
+        target_rain_value_scaled = batch['target']
+        target_did_rain = torch.where( target_rain_value_scaled > 0.5*self.target_scale, 1.0, 0.0 )
+        mask = batch.get('mask',None)
+        if mask is not None:
+            if mask.dtype is not torch.bool:
+                mask = mask.to(torch.bool)
+            mask = ~mask
             
-            # Predicting
-            output  = self.forward(inp)
-
-            pred_mu_scaled = output['mu']
-            pred_disp_scaled = output['disp'] 
-            pred_p_scaled  = output['p']
-            pred_logits_scaled = output['logits']
-
-            # extracting the central region of interest
-            bounds = Era5EobsDataset.central_region_bounds(self.dconfig) #list [ lower_h_bound[0], upper_h_bound[0], lower_w_bound[1], upper_w_bound[1] ]
-
-            if pred_mu_scaled.dim() == 2 :
-                pred_mu_scaled = pred_mu_scaled[..., None, None]
-                pred_disp_scaled = pred_disp_scaled[..., None, None]
-                pred_p_scaled = pred_p_scaled[..., None, None]
-                pred_logits_scaled = pred_logits_scaled[..., None, None]
-                target_rain_value_scaled = target_rain_value_scaled[..., None, None]
-                target_did_rain = target_did_rain[..., None, None]
-                mask = mask[..., None, None]
-                
-            pred_mu_scaled   = Era5EobsDataset.extract_central_region(pred_mu_scaled, bounds )
-            pred_disp_scaled   = Era5EobsDataset.extract_central_region(pred_disp_scaled, bounds )
-            pred_p_scaled   = Era5EobsDataset.extract_central_region(pred_p_scaled, bounds )
-            pred_logits_scaled   = Era5EobsDataset.extract_central_region(pred_logits_scaled, bounds )
-            mask    = Era5EobsDataset.extract_central_region(mask, bounds )
-            target_did_rain = Era5EobsDataset.extract_central_region(target_did_rain, bounds )
-            target_rain_value_scaled  = Era5EobsDataset.extract_central_region(target_rain_value_scaled, bounds )
-
-            # Patch/Pixel masking loss 
-            pixel_mask = True #Defaults to True
-            if pred_mu_scaled.shape[-1]!=1 or pred_mu_scaled.shape[-2]!=1:
-                #No pixel masking if we have a point prediction
-                pixel_mask = torch.bernoulli( torch.empty( pred_mu_scaled.shape, device=mask.device ).fill_(self.pixel_sample_prop)  )
-                pixel_mask = pixel_mask.to(torch.bool)
-
-            # applying mask for loss and evaluation metrics
-            pred_mu_scaled_masked      = torch.masked_select(pred_mu_scaled, (mask & pixel_mask ) )
-            pred_disp_scaled_masked    = torch.masked_select(pred_disp_scaled, (mask & pixel_mask) ) 
-            pred_p_scaled_masked       = torch.masked_select(pred_p_scaled, (mask & pixel_mask) ) 
-            target_rain_value_scaled_masked   = torch.masked_select(target_rain_value_scaled, (mask & pixel_mask) )
-            pred_logits_scaled_masked = torch.masked_select(pred_logits_scaled, (mask & pixel_mask) )
-
-            target_did_rain_masked = torch.masked_select(target_did_rain, (mask & pixel_mask) )
+        idx_loc_in_region = batch.get('idx_loc_in_region',None)
         
-            # Calculating Losses
-            loss, composite_losses = self.loss_fct( target_rain_value_scaled_masked, target_did_rain_masked, pred_mu_scaled_masked, 
-                                        pred_disp_scaled_masked, logits=pred_logits_scaled_masked,
-                                        p=pred_p_scaled_masked, global_step=self.global_step)
+        # Predicting
+        output  = self.forward(inp)
 
-            #Unscaling predictions for prediction metrics
-            pred_mu_masked, pred_disp_masked, pred_p_masked = self.target_distribution.unscale_distribution( 
-                                                        pred_mu_scaled_masked.detach(), pred_disp_scaled_masked.detach(),
-                                                        pred_p_scaled_masked.detach(), self.scaler_target )
+        pred_mu_scaled = output['mu']
+        pred_disp_scaled = output['disp'] 
+        pred_p_scaled  = output['p']
+        pred_logits_scaled = output['logits']
 
-            pred_mean_masked = self.target_distribution.get_mean( pred_mu_masked, pred_disp_masked, pred_p_masked )
+        # extracting the central region of interest
+        bounds = Era5EobsDataset.central_region_bounds(self.dconfig) #list [ lower_h_bound[0], upper_h_bound[0], lower_w_bound[1], upper_w_bound[1] ]
 
-            target_rain_value_masked = self.unscale_rain(target_rain_value_scaled_masked, self.scaler_target)
-
-            pred_metrics = self.loss_fct.prediction_metrics(target_rain_value_masked, target_did_rain_masked, pred_mean_masked,
-                                                                logits=pred_logits_scaled_masked, 
-                                                                p=pred_p_masked, min_rain_value=self.min_rain_value )
+        if pred_mu_scaled.dim() == 2 :
+            pred_mu_scaled = pred_mu_scaled[..., None, None]
+            pred_disp_scaled = pred_disp_scaled[..., None, None]
+            pred_p_scaled = pred_p_scaled[..., None, None]
+            pred_logits_scaled = pred_logits_scaled[..., None, None]
+            target_rain_value_scaled = target_rain_value_scaled[..., None, None]
+            target_did_rain = target_did_rain[..., None, None]
+            mask = mask[..., None, None]
             
-            loss.masked_fill_(loss.isnan(), 0)
+        pred_mu_scaled   = Era5EobsDataset.extract_central_region(pred_mu_scaled, bounds )
+        pred_disp_scaled   = Era5EobsDataset.extract_central_region(pred_disp_scaled, bounds )
+        pred_p_scaled   = Era5EobsDataset.extract_central_region(pred_p_scaled, bounds )
+        pred_logits_scaled   = Era5EobsDataset.extract_central_region(pred_logits_scaled, bounds )
+        mask    = Era5EobsDataset.extract_central_region(mask, bounds )
+        target_did_rain = Era5EobsDataset.extract_central_region(target_did_rain, bounds )
+        target_rain_value_scaled  = Era5EobsDataset.extract_central_region(target_rain_value_scaled, bounds )
+
+        # Patch/Pixel masking loss 
+        pixel_mask = True #Defaults to True
+        if pred_mu_scaled.shape[-1]!=1 or pred_mu_scaled.shape[-2]!=1:
+            #No pixel masking if we have a point prediction
+            pixel_mask = torch.bernoulli( torch.empty( pred_mu_scaled.shape, device=mask.device ).fill_(self.pixel_sample_prop)  )
+            pixel_mask = pixel_mask.to(torch.bool)
+
+        # applying mask for loss and evaluation metrics
+        pred_mu_scaled_masked      = torch.masked_select(pred_mu_scaled, (mask & pixel_mask ) )
+        pred_disp_scaled_masked    = torch.masked_select(pred_disp_scaled, (mask & pixel_mask) ) 
+        pred_p_scaled_masked       = torch.masked_select(pred_p_scaled, (mask & pixel_mask) ) 
+        target_rain_value_scaled_masked   = torch.masked_select(target_rain_value_scaled, (mask & pixel_mask) )
+        pred_logits_scaled_masked = torch.masked_select(pred_logits_scaled, (mask & pixel_mask) )
+
+        target_did_rain_masked = torch.masked_select(target_did_rain, (mask & pixel_mask) )
+    
+        # Calculating Losses
+        loss, composite_losses = self.loss_fct( target_rain_value_scaled_masked, target_did_rain_masked, pred_mu_scaled_masked, 
+                                    pred_disp_scaled_masked, logits=pred_logits_scaled_masked,
+                                    p=pred_p_scaled_masked, global_step=self.global_step)
+
+        #Unscaling predictions for prediction metrics
+        pred_mu_masked, pred_disp_masked, pred_p_masked = self.target_distribution.unscale_distribution( 
+                                                    pred_mu_scaled_masked.detach(), pred_disp_scaled_masked.detach(),
+                                                    pred_p_scaled_masked.detach(), self.scaler_target )
+
+        pred_mean_masked = self.target_distribution.get_mean( pred_mu_masked, pred_disp_masked, pred_p_masked )
+
+        target_rain_value_masked = self.unscale_rain(target_rain_value_scaled_masked, self.scaler_target)
+
+        pred_metrics = self.loss_fct.prediction_metrics(target_rain_value_masked, target_did_rain_masked, pred_mean_masked,
+                                                            logits=pred_logits_scaled_masked, 
+                                                            p=pred_p_masked, min_rain_value=self.min_rain_value )
+        
+        loss.masked_fill_(loss.isnan(), 0)
 
         # Logging
         if self.debugging and step_name=='train' and pred_mu_masked.numel() != 0:
@@ -358,167 +332,185 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             if output['pred_metrics']['pred_acc']: self.log("test_metric/acc",output['pred_metrics']['pred_acc'] , on_step=False, on_epoch=True)
             if output['pred_metrics']['pred_rec']: self.log("test_metric/recall",output['pred_metrics']['pred_rec'] , on_step=False, on_epoch=True)
             if output['pred_metrics']['pred_mse']: self.log("test_metric/mse_rain",output['pred_metrics']['pred_mse'] , on_step=False, on_epoch=True )
-            if output['pred_metrics']['pred_r10mse']: 
+            if output['pred_metrics']['pred_r10mse']:
                 if not torch.isnan( output['pred_metrics']['pred_r10mse'] ).any().item():
                     self.log("test_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'], on_step=False, on_epoch=True, )
 
         if self.task == "uk_rain": 
             output['li_locations'] = batch.pop('li_locations',None)
             output['target_date_window'] = batch.pop('target_date_window',None)
-                        
+        
+        # downcasting       
+        output['pred_mu'] = output['pred_mu'].numpy().astype(np.float32)
+        output['pred_disp'] = output['pred_disp'].numpy().astype(np.float32)
+        output['pred_p'] = output['pred_p'].numpy().astype(np.float16)
+        output['target_did_rain'] = output['target_did_rain'].numpy().astype(np.float16)
+        output['target_rain_value'] = output['target_rain_value'].numpy().astype(np.float16)
+        output['idx_loc_in_region'] = output['idx_loc_in_region'].numpy().astype(np.float16)
+        output['mask'] = output['mask'].numpy()
+        
+        if output['pred_metrics']['pred_mse'] is not None:
+            output['pred_metrics']['pred_mse'] = output['pred_metrics']['pred_mse'].to('cpu').numpy().astype(np.float16)
+        
+        if output['pred_metrics']['pred_rec'] is not None:
+            output['pred_metrics']['pred_rec'] = output['pred_metrics']['pred_rec'].to('cpu').numpy().astype(np.float16)
+        
+        if output['pred_metrics']['pred_acc'] is not None:
+            output['pred_metrics']['pred_acc'] = output['pred_metrics']['pred_acc'].to('cpu').numpy().astype(np.float16)
+        
+        if output['pred_metrics']['pred_r10mse'] is not None:
+            output['pred_metrics']['pred_r10mse'] = output['pred_metrics']['pred_r10mse'].to('cpu').numpy().astype(np.float16) if output['pred_metrics']['pred_r10mse'] else np.nan
+        
+        output.pop('composite_losses',None)
+        output.pop('loss')
+        
         return output
 
     def test_epoch_end(self, outputs: EPOCH_OUTPUT) -> None:
+        print("\nSaving Test Output to File")
     
         # Saving the predictions and targets from the test sets
-        pred_mu = torch.cat( [output['pred_mu'] for output in outputs], dim=0)
-        pred_disp = torch.cat( [output['pred_disp'] for output in outputs], dim=0)
-        pred_p = torch.cat( [output['pred_p'] for output in outputs], dim=0)
+        pred_mu = np.concatenate( [output.pop('pred_mu')  for output in outputs], axis=0)
+        pred_disp = np.concatenate( [output.pop('pred_disp') for output in outputs], axis=0)
+        pred_p = np.concatenate( [output.pop('pred_p') for output in outputs], axis=0)
+        gc.collect()
+        idx_loc_in_region = np.concatenate( [output.pop('idx_loc_in_region') for output in outputs], axis=0)
 
-        idx_loc_in_region = torch.cat( [output['idx_loc_in_region'] for output in outputs], dim=0)
 
         #target data
-        target_did_rain = torch.cat( [output['target_did_rain'] for output in outputs], dim=0 )
-        target_rain_value = torch.cat( [output['target_rain_value'] for output in outputs], dim=0 )
-        target_date_window = np.concatenate([output['target_date_window'] for output in outputs] )
-        
-        pred_mu = pred_mu.cpu().to(torch.float16).numpy()
-        pred_disp = pred_disp.cpu().to(torch.float16).numpy()
-        pred_p = pred_p.cpu().to(torch.float16).numpy()
-        idx_loc_in_region = idx_loc_in_region.cpu().numpy()
-
+        target_did_rain = np.concatenate([output.pop('target_did_rain') for output in outputs], axis=0 )
+        target_rain_value = np.concatenate([output.pop('target_rain_value') for output in outputs], axis=0 )
+        target_date_window = np.concatenate([output.pop('target_date_window') for output in outputs] )
+        gc.collect()
         # Split predictions by location
         test_dl = self.trainer.test_dataloaders[0]
 
-        if self.task == "australia_rain":
-            locations = [ ds.location for ds in test_dl.dataset.datasets]
-            cumulative_sizes = [0] + test_dl.dataset.cumulative_sizes
-            
-            dict_loc_data = {}
-            for idx, loc in enumerate(locations):
-                if cumulative_sizes==0:
-                    continue
-                s_idx = cumulative_sizes[idx]
-                e_idx = cumulative_sizes[idx+1]
 
-                lookback = test_dl.dataset.datasets[idx].lookback
-                dates = test_dl.dataset.datasets[idx].dates #dates in dataset that are valid
-                indexes_filtrd = test_dl.dataset.datasets[idx].indexes_filtrd #indexes_filtrd
-                
-                date_windows = [ dates[idx-lookback:idx] for idx in indexes_filtrd[lookback: ] ]
-
-                data = {'pred_mu':pred_mu[s_idx:e_idx],
-                        'pred_disp':pred_disp[s_idx:e_idx],
-                        'target_did_rain':target_did_rain[s_idx:e_idx],
-                        'target_rain_value':target_rain_value[s_idx:e_idx],
-                        'date':date_windows }
-                
-                data['pred_p'] = pred_p[s_idx:e_idx]
-
-                dict_loc_data[loc] = data
-
-            dir_path = os.path.dirname( next( ( callback for callback in self.trainer.callbacks if type(callback)==pl.callbacks.model_checkpoint.ModelCheckpoint) ).dirpath )
-            file_path = os.path.join( dir_path, "test_output.pkl" ) 
-            with open( file_path, "wb") as f:
-                pickle.dump( dict_loc_data, f )
-        
-        elif self.task == "uk_rain":
-
-            dconfig = test_dl.dataset.dconfig
-                        
-            dict_loc_data = defaultdict(dict)
-            lookback = dconfig.lookback_target
-
-            mask = torch.cat( [ output['mask'] for output in outputs], dim=0 )
-            mask = mask.cpu().to(torch.float16).numpy()
-            
-            #Flattening all the objects
-            pred_mu = pred_mu.reshape(-1, *pred_mu.shape[2:] )
-            pred_disp = pred_disp.reshape(-1, *pred_disp.shape[2:] )
-            pred_p = pred_p.reshape(-1, *pred_p.shape[2:] )
-            idx_loc_in_region = idx_loc_in_region.repeat(dconfig.lookback_target,0)
-            target_did_rain =target_did_rain.reshape(-1, *target_did_rain.shape[2:] )
-            target_rain_value = target_rain_value.reshape(-1, *target_rain_value.shape[2:] )
-            mask = mask.reshape(-1, *mask.shape[2:] )
-            target_date_window = target_date_window.reshape(-1 )
-            locations = sum( sum( [output['li_locations'] for output in outputs], []), [] )
-            
-            #Determining the start and end index for each location's portion of the dataset   
-
-            #Assuming we consider predictions in blocks of 7 (lookback) the below marks every seventh block of predictions where i is where new data for where location starts
-            start_idxs_for_location_subset = [ (idx,loc) for idx,loc in enumerate(locations) if (idx==0 or loc!=locations[idx-1]) ]
-            end_idxs_for_location_subset = start_idxs_for_location_subset[1:] + [ (len(locations), "End") ] 
-
-            assert end_idxs_for_location_subset[-1][0] == pred_mu.shape[0], "The final end idxs should be the same as the length of the overall dataset"
-            
-            
-            dict_loc_li_data = defaultdict(dict)
-            
-            for idx  in range( len( start_idxs_for_location_subset)-1 ):
-
-                loc = start_idxs_for_location_subset[idx][1]
-                s_idx = start_idxs_for_location_subset[idx][0]
-                e_idx = end_idxs_for_location_subset[idx][0]
-
-                # Need to concat data for each city
-                datum_start_date = dconfig.test_start if (loc not in dict_loc_data.keys()) else ( dict_loc_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
-
-                data = {
-                    'pred_mu':pred_mu[s_idx:e_idx],
-                        'pred_disp':pred_disp[s_idx:e_idx],
-                        'target_did_rain':target_did_rain[s_idx:e_idx],
-                        'target_rain_value':target_rain_value[s_idx:e_idx],
-                        'date':target_date_window[s_idx:e_idx],
-                        'pred_p': pred_p[s_idx:e_idx],
-                        'mask':mask[s_idx:e_idx],
-                        'idx_loc_in_region': idx_loc_in_region[s_idx:e_idx] }
-
-                # For each location store  a list of the data predictions
-                if loc not in dict_loc_li_data:
-                    dict_loc_li_data[loc] = [data]
-                else:
-                    dict_loc_li_data[loc].append(data)
-                
-            # Now concatenating all the predictions along time axis for each location
-            # Also sorting predictions
-            saved_feature_names = next( iter(dict_loc_li_data[loc] )).keys()
-            for loc in dict_loc_li_data.keys():
-                
-                li_dates = np.concatenate( tuple( d['date'] for d in  dict_loc_li_data[loc] ) ) 
-                ordered_idxs = np.argsort( li_dates )
-                
-                for k in saved_feature_names:
+        dconfig = test_dl.dataset.dconfig
                     
-                    array =  np.concatenate( tuple(d[k] for d in dict_loc_li_data[loc] ) )
-                    array_sorted = array[ordered_idxs]
-                    dict_loc_data[loc][k] = array
-                                   
-            dir_path = os.path.dirname( os.path.dirname( self.trainer.resume_from_checkpoint ) )  if self.trainer.resume_from_checkpoint else self.trainer.log_dir
+        dict_loc_data = defaultdict(dict)
+        
+        mask = np.concatenate( [ output.pop('mask') for output in outputs], axis=0 )
+        
+        
+        #Flattening all the objects
+        pred_mu = pred_mu.reshape(-1, *pred_mu.shape[2:] )
+        pred_disp = pred_disp.reshape(-1, *pred_disp.shape[2:] )
+        pred_p = pred_p.reshape(-1, *pred_p.shape[2:] )
+        idx_loc_in_region = idx_loc_in_region.repeat(dconfig.lookback_target,0)
+        target_did_rain =target_did_rain.reshape(-1, *target_did_rain.shape[2:] )
+        target_rain_value = target_rain_value.reshape(-1, *target_rain_value.shape[2:] )
+        mask = mask.reshape(-1, *mask.shape[2:] )
+        target_date_window = target_date_window.reshape(-1 )
+        
+        _ = np.concatenate( [output.pop('li_locations') for output in outputs], axis=0 )
+        locations = _.reshape(-1)
+        
+        gc.collect()
+        # === Determining the start and end index for each location's portion of the dataset   
 
-            #add teststart_testend to end of test_output.pkl and summary.json fns
-            suffix = f"{dconfig.test_start}_{dconfig.test_end}"
-            file_path = os.path.join( dir_path, f"test_output_{suffix}.pkl" ) 
-            with open( file_path, "wb") as f:
-                pickle.dump( dict_loc_data, f )
+        # Assuming we consider predictions in blocks of 7 (lookback) the below marks every seventh block of predictions where i is where new data for where location starts
+        # Gathering indexes indicating where predictions should be split since the location has shifted
+        start_idxs_for_location_subset = [ (idx,str(loc)) for idx,loc in enumerate(locations) if (idx==0 or loc!=locations[idx-1]) ]
+        end_idxs_for_location_subset = start_idxs_for_location_subset[1:] + [ (len(locations), "End") ] 
+
+        assert end_idxs_for_location_subset[-1][0] == pred_mu.shape[0], "The final end idxs should be the same as the length of the overall dataset"
+                    
+        dict_loc_li_data = defaultdict(dict)
+        
+        for idx  in range( len( start_idxs_for_location_subset)-1 ):
+
+            loc = start_idxs_for_location_subset[idx][1]
+            s_idx = start_idxs_for_location_subset[idx][0]
+            e_idx = end_idxs_for_location_subset[idx][0]
+
+            # Need to concat data for each city
+            datum_start_date = dconfig.test_start if (loc not in dict_loc_data.keys()) else ( dict_loc_data[loc]['date'][-1]+pd.to_timedelta(1,'D') )
+
+            data = {
+                'pred_mu':pred_mu[s_idx:e_idx],
+                    'pred_disp':pred_disp[s_idx:e_idx],
+                    'target_did_rain':target_did_rain[s_idx:e_idx],
+                    'target_rain_value':target_rain_value[s_idx:e_idx],
+                    'date':target_date_window[s_idx:e_idx],
+                    'pred_p': pred_p[s_idx:e_idx],
+                    'mask':mask[s_idx:e_idx],
+                    'idx_loc_in_region': idx_loc_in_region[s_idx:e_idx] }
+
+
+            # For each location store  a list of the data predictions
+            if loc not in dict_loc_li_data:
+                dict_loc_li_data[loc] = [data]
+            else:
+                dict_loc_li_data[loc].append(data)
+            # del data
+        
+                    
+        # Now concatenating all the predictions along time axis for each location
+        # Also sorting predictions
+        feature_names = deepcopy(list(next( iter(dict_loc_li_data[loc] )).keys()))
+        unique_locations = deepcopy(list(dict_loc_li_data.keys()))
+        
+        for loc in unique_locations:
             
-            # Recording losses on test set and summarised information about test run
-            summary = {
-                'train_start': dconfig.train_start,
-                'train_end':dconfig.train_end,
-                'val_start':dconfig.val_start,
-                'val_end':dconfig.val_end,
-                'test_start':dconfig.test_start,
-                'test_end':dconfig.test_end,
-                'test_mse':  torch.stack( [output['pred_metrics']['pred_mse'] for output in outputs if output['pred_metrics']['pred_mse'] ], dim=0 ).mean().to('cpu').squeeze().item()  ,
-                
-                'test_r10mse':  torch.stack( [output['pred_metrics']['pred_r10mse'] for output in outputs if output['pred_metrics']['pred_r10mse']], dim=0 ).nanmean().to('cpu').squeeze().item()  ,
-                'test_acc': torch.stack( [output['pred_metrics']['pred_acc'] for output in outputs if output['pred_metrics']['pred_acc']], dim=0 ).mean().to('cpu').squeeze().item() ,
-                'test_rec':torch.stack( [output['pred_metrics']['pred_rec'] for output in outputs if output['pred_metrics']['pred_rec']], dim=0 ).mean().to('cpu').squeeze().item() ,
-            }
+            li_data = dict_loc_li_data.pop(loc)
+            
+            li_dates = np.concatenate( tuple( d['date'] for d in  li_data ) ) 
+            ordered_idxs = np.argsort( li_dates )
+            
+            for k in feature_names:
+                                    
+                dict_loc_data[loc][k] = np.concatenate( tuple(d.pop(k) for d in li_data ) ) [ordered_idxs]
+                                
+            del li_data
+            gc.collect()
+                                
+        dir_path = os.path.dirname( os.path.dirname( self.trainer.resume_from_checkpoint ) )  if self.trainer.resume_from_checkpoint else self.trainer.log_dir
 
-            file_path_summary = os.path.join(dir_path, f"summary_{suffix}.json")
-            with open(file_path_summary, "w") as f:
-                json.dump( summary, f)
+        #add teststart_testend to end of test_output.pkl and summary.json fns
+        suffix = f"{dconfig.test_start}_{dconfig.test_end}"
+        file_path = os.path.join( dir_path, f"test_output_{suffix}.pkl" ) 
+        with open( file_path, "wb") as f:
+            pickle.dump( dict_loc_data, f )
+        
+        #TODO {rilwan.ade} clean up this implementation
+        
+        try:    
+            test_mse =  np.stack( [output['pred_metrics'].pop('pred_mse')  for output in outputs if output['pred_metrics']['pred_mse'] ], axis=0 ).mean().squeeze().item()  
+        except Exception:
+            test_mse = np.nan
+        try:
+            test_r10mse =  np.nanmean(np.stack( [output['pred_metrics'].pop('pred_r10mse') for output in outputs if output['pred_metrics']['pred_r10mse']], axis=0 )).squeeze().item() 
+        except Exception:
+            test_r10mse = np.nan
+        try:    
+            test_acc = np.stack( [output['pred_metrics'].pop('pred_acc') for output in outputs if output['pred_metrics']['pred_acc']], axis=0 ).mean().squeeze().item()
+        except Exception:
+            test_acc = np.nan
+        
+        try:
+            test_rec = np.stack( [output['pred_metrics'].pop('pred_rec') for output in outputs if output['pred_metrics']['pred_rec']], axis=0 ).mean().squeeze().item()
+        except Exception:
+            test_rec = np.nan
+            
+        # Recording losses on test set and summarised information about test run
+        summary = {
+            'train_start': dconfig.train_start,
+            'train_end':dconfig.train_end,
+            'val_start':dconfig.val_start,
+            'val_end':dconfig.val_end,
+            'test_start':dconfig.test_start,
+            'test_end':dconfig.test_end,
+            'test_mse':  test_mse  ,
+            
+            'test_r10mse':  test_r10mse,
+            'test_acc': test_acc,
+            'test_rec': test_rec ,
+        }
+
+        file_path_summary = os.path.join(dir_path, f"summary_{suffix}.json")
+        with open(file_path_summary, "w") as f:
+            json.dump( summary, f)
 
         return super().test_epoch_end(outputs)
         
@@ -529,7 +521,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                                 warmup_init=True,
                                 lr=None, 
                                 beta1=self.beta1,
-                                clip_threshold=1.0)
+                                clip_threshold=0.5)
         
         lr_scheduler = AdafactorSchedule(optimizer)
         # lr_scheduler = get_constant_schedule_with_warmup( optimizer, num_warmup_steps=1000, last_epoch=-1)

@@ -1,31 +1,22 @@
-from audioop import add
-from genericpath import exists
-from pydoc import apropos
-from re import L, M
-from tokenize import String
-from attr import has
-from aiohttp import worker
 from functools import lru_cache
 import hashlib
 import numpy as np
 import pandas as pd
+import gc
 from pandas._libs import missing
 import torch
 from torch._C import Value
 import torch.distributions as td
-from torch.functional import Tensor
 from torch.utils.data import Dataset, Subset
-from sklearn.preprocessing import MinMaxScaler, PolynomialFeatures, StandardScaler, FunctionTransformer, MaxAbsScaler   
+from sklearn.preprocessing import MinMaxScaler, StandardScaler   
 import math
 import copy
-from pytorch_lightning.profiler import Profiler, PassThroughProfiler
 import os
 from torch._six import string_classes
 import ujson
 import pickle
 import regex  as re
 from typing import Tuple, Callable,  Union, Dict, List, TypeVar
-from torchtyping import TensorDetail,TensorType
 import argparse
 import json
 import ujson
@@ -36,7 +27,6 @@ import glob
 from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.data import IterableDataset
 import random
-from collections import defaultdict
 from glm_utils import tuple_type
 from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper
 from frozendict import frozendict
@@ -59,6 +49,7 @@ from itertools import product
         More info in class description.
     
 """
+
 
 #classes that allow caching on dictionary
 
@@ -84,534 +75,7 @@ def deep_freeze_args(func):
         return func(*deep_freeze(args), **deep_freeze(kwargs))
     return wrapped
 
-# -- Toy Dataset
-class ToyDataset(Dataset):
-    """
-        ToyDataset:
-            This is a toy dataset. It can be used to investigate how well a bayesian neural net can model uncertainty.
-            A bayesian neural network can learn to model the following two forms of uncertainty:
-                1) Uncertainty due to not enough data provided for a particular set of X. e.g. 
-                    when we have a imbalanced/skewed dataset that has few pairs (X,Y) for some subset of X
-                2) Uncertainty due to the dataset being 
-        
-        This class takes features and target and creates a torch Dataset class
-    """
-    def __init__(self, features, target ):
-        self.features = features
-        self.target = target
-
-    def __len__(self):
-        return len(self.features)
-
-    def __getitem__(self, idx):
-        feature = self.features[idx]
-        target = self.target[idx]
-        return feature, target
-    
-    @staticmethod
-    def get_distribution(self, distribution_name ,**distribution_kwargs ):
-
-        MAP_DISTR_SAMPLE = {
-            'uniform': lambda lb, ub: td.Uniform(lb, ub),
-            
-            'mv_uniform': lambda lb=0, ub=1:td.Independent( td.Uniform(lb, ub), 1 ),
-
-            'mv_normal': lambda loc=torch.zeros((6,)), covariance_matrix=torch.eye(6): td.MultivariateNormal( loc , covariance_matrix ),
-            
-            'mv_lognormal': lambda loc=torch.zeros((6,)), scale=torch.ones( (6,) ):td.Independent( td.LogNormal( loc , scale ), 1 )
-
-        }
-
-        distr =  MAP_DISTR_SAMPLE[distribution_name](**distribution_kwargs)
-
-    @staticmethod
-    def get_dataset(    
-        input_shape:Tuple[int,...],
-        target_func:Callable[ [float, float, float], float],
-        sample_size:int=1000,
-        distribution_name:str='uniform',
-        distribution_kwargs:dict={},
-        noise_method:str='random_guassian',
-        noise_sample_params:dict={ 'loc':0, 'scale':0.1 },
-        **kwargs):
-        raise NotImplementedError
-        assert noise_method in [ 'random_guassian','increasing_at_extremes', 'increasing_at_maximum', 'increasing_at_minimum' ,'intervals']
-        
-        """Generates 3 Dataset objects for the training, validation and testing steps.
-            The toy dataset generated will contain (X,Y) where Y = c + ax + bx^2 + epsilon, where epsilon is random noise.
-            The co-effecients a,b,c are chosen at random.
-            In the actual implementation we create Y=c + ax + bx^2, then we pair Y with (x+epsilon). This allows variance to scale with size of Y
-
-        Args:
-            input_shape (Tuple[int,...]): A tuple representing the input shape of the data, excluding the batch dimension.
-            target_func (Callable[ [float, float], float]): The function mapping X -> Y - epsilon.
-            sample_size (int): An int explaining the size of the combined size of the train, validation and test set.
-            distribution_name (str): Distribution from which to sample X
-            distribution_kwargs (dict): Dictionary containing key-word params for the sampling of X from the class relating to distribution_name
-            noise_method (str): The method used to sample the noise term, epsilon 
-
-        Returns:
-            Dataset: Returns the Dataset object which produces paired samples of features and target data
-        """
-        
-        distr =  ToyDataset.get_distribution( distribution_name, **distribution_kwargs)
-
-        X = distr.sample( (sample_size,) )
-        #add noise to X instead of Y
-        X_pertubed = ToyDataset.add_noise(X, noise_method, noise_sample_params) 
-
-        Y = target_func( X_pertubed )
-
-        if Y.ndim==1:
-            Y = Y.unsqueeze(-1)
-
-        ds = ToyDataset(X,Y)
-
-        # splitting dataset into train, validation and test
-        train_idx_start = 0
-        val_idx_start = int(0.6*sample_size)
-        test_idx_start = int(0.8*sample_size)
-
-        # Dividing into train, test, val
-        ds_train = Subset(ds, indices = list( range(train_idx_start,val_idx_start) ) ) 
-        ds_val = Subset(ds, indices = list( range(val_idx_start, test_idx_start) ))
-        ds_test = Subset(ds, indices = list( range(val_idx_start, test_idx_start) ))
-
-        return ds_train, ds_val, ds_test
-
-    @staticmethod
-    def add_noise( input:torch.Tensor,
-        method:str='random_guassian',
-        noise_sample_params:dict=None) -> torch.Tensor: 
-        """This method adds random pertubations (noise) to an input tensor
-
-        Args:
-            input (Tensor): [Tensor] Tensor to add noise to
-            method (str, optional): [description]. Defaults to 'increasing_at_extremes'.
-            noise_sample_params (dict, optional): Dictionary containing keyword arguments
-                for distribution used to sample noise. Defaults to None.
-
-        Raises:
-            NotImplementedError: Only implemented noise method is "random_guassian"
-            ValueError: [description]
-
-        Returns:
-            [Tensor]: input + noise
-        """
-
-
-        if method == 'random_guassian':
-            input = input + td.Normal(**noise_sample_params ).sample( tuple(input.shape) ) 
-            input.clamp_min(0.00)
-
-        # Add noise proportional to decile the data is in
-        elif method == 'increasing_at_extremes':
-            raise NotImplementedError
-
-        # Add relatively more noise to the max deciles
-        elif method == 'increasing_at_maximum':
-            raise NotImplementedError
-
-        # Add relatively more noise to the minimum deciles
-        elif method == 'increasing_at_minimum':
-            raise NotImplementedError
-
-        # Add more noise proportional to the size of the value
-        elif method == 'intervals':
-            raise NotImplementedError
-
-        else:
-            raise ValueError
-        
-        return input
-
-    @staticmethod
-    def parse_data_args(parent_parser):
-        parser = argparse.ArgumentParser(
-            parents=[parent_parser], add_help=True, allow_abbrev=False)
-        parser.add_argument("--target_params", default=[0.0, 3.0, 0.5], type=lambda _str: json.loads(_str) )
-
-        parser.add_argument("--input_shape", default=(1,) )
-        parser.add_argument("--output_shape", default=(1,) )
-        parser.add_argument("--noise_sample_params", default={ 'loc':0, 'scale':0.1 }, type=dict)
-        data_args = parser.parse_known_args()[0]
-        return data_args
-
-class AustraliaRainDataset(Dataset):
-    """
-        Dataset source: https://www.kaggle.com/fredericods/forecasting-rain/data?select=weatherAUS.csv
-
-        This dataset contains about 10 years of daily weather observations from numerous Australian weather stations.
-        
-        This dataset provides point estimates.
-
-        The target RainTomorrow means: Did it rain the next day? Yes or No.
-
-        Note: You should exclude the variable Risk-MM when training your binary classification model. If you don't exclude it, you will leak the answers to your model and reduce its predictability. Read more about it here.
-
-    """
-
-    # list of locations that can be used for the Australia Dataset
-    locations = sorted(['Albury', 'BadgerysCreek', 'Cobar', 'CoffsHarbour', 'Moree',
-            'Newcastle', 'NorahHead', 'NorfolkIsland', 'Penrith', 'Richmond',
-            'Sydney', 'SydneyAirport', 'WaggaWagga', 'Williamtown',
-            'Wollongong', 'Canberra', 'Tuggeranong', 'MountGinini', 'Ballarat',
-            'Nhil', 'Portland', 'Watsonia', 'Dartmoor', 'Brisbane', 'Cairns',
-            'GoldCoast', 'Townsville', 'Adelaide', 'MountGambier', 'Nuriootpa',
-            'Woomera', 'Albany', 'Witchcliffe', 'PearceRAAF', 'PerthAirport',
-            'Perth', 'SalmonGums', 'Walpole', 'Hobart', 'Launceston',
-            'AliceSprings', 'Darwin', 'Katherine', 'Uluru'])
-    
-    valid_locations = sorted(['Adelaide', 'Albury', 'AliceSprings', 'BadgerysCreek', 'Ballarat',
-       'Brisbane', 'Cairns', 'Canberra', 'Cobar', 'CoffsHarbour',
-       'Dartmoor', 'Darwin', 'GoldCoast', 'Hobart',
-       'Moree', 'MountGambier', 'Nhil', 'NorahHead',
-       'NorfolkIsland', 'Nuriootpa', 'PearceRAAF', 'Perth',
-       'PerthAirport', 'Portland', 'Richmond', 'Sydney', 'SydneyAirport',
-       'Townsville', 'Tuggeranong', 'Uluru', 'WaggaWagga', 'Walpole',
-       'Watsonia', 'Williamtown', 'Witchcliffe', 'Wollongong', 'Woomera']) # These are the locations which have enough valid entries to not cause errors with default settings
-    
-    def __init__(self,
-                    features:pd.DataFrame,
-                    targets:pd.DataFrame,
-                    lookback:int=7,
-                    location:str=None) -> None:
-        """Initializes at Australian Rain Dataset.
-            Expected use of this dataset: Predict rainfall at, using weather information from day
-            Due to erroneous information at specific dates in feature dataset,
-                there are some days which have been dropped from feature and target datasets. However,
-                this Dataset expects a sequence of days to be used for generating a loss. Therefore, we must
-                ignore any l=lookback period where the period contains any days that have been dropped from the 
-                dataset.
-                
-
-        Args:
-            features (pd.DataFrame): [A pandas DataFrame containing the features. The index must be a datetime index ]
-            targets (pd.DataFrame): [A pandas DataFrame containing the targets. The index must be a datetime index ]
-            lookback (int, optional): Lookback Period
-            location (str, optional): City name for which the data is from. Defaults to None.
-        """
-        super().__init__()
-        
-        self.features = features
-        self.targets = targets
-        self.lookback = lookback
-        self.location = location
-
-        assert self.features.index.equals(self.targets.index), "Datetime Index of features and target are not the same"
-        
-        self.create_index_exclude_missing_days()
-
-    def create_index_exclude_missing_days(self) -> None:
-        """
-            This function creates a new list. This list contains the indicies of days in the feature and target,
-            which are valid for use as an input and target.
-
-            A day d, is valid if all the days in the the range d-lookback to d are included in the feature and target dataset.
-            
-        """        
-        self.dates = copy.deepcopy(self.features.index)
-        self.indexes_filtrd = list(range(len(self.dates)))
-
-        # A list of days missing from the index
-        missing_days = pd.date_range(start=self.features.index[0], end=self.features.index[-1]).difference(self.features.index)
-
-        # Let m_day be a day missing from the feature and target dataframes
-        # For each m_day, get the list of days which need m_day for prediction
-            # Then remove this list of days from the dates
-        for m_day in reversed(missing_days):
-            
-            li_affected_day = pd.date_range(start = m_day, end = m_day +  pd.DateOffset(days=self.lookback) )
-                
-            for affected_day in reversed(li_affected_day):
-                
-                if affected_day in self.dates:
-
-                    index_affected_day = self.dates.get_loc(affected_day)
-
-                    if type(index_affected_day)==slice:
-                        raise ValueError
-                        
-                    elif type(index_affected_day)==int:
-                        self.dates = self.dates.drop(affected_day)
-                        self.indexes_filtrd.pop(index_affected_day)
-
-                    else:
-                        pass
-        
-    def __len__(self):
-        return max(0,len(self.indexes_filtrd) - self.lookback)
-        
-    def __getitem__(self, index):
-        
-        index = index + self.lookback
-        adj_index = self.indexes_filtrd[index]
-        features = self.features.iloc[ adj_index-self.lookback:adj_index ].to_numpy(dtype=np.float32)
-        targets = self.targets.iloc[ adj_index-self.lookback:adj_index].to_numpy()
-        
-        return torch.tensor(features), torch.tensor(targets)
-
-    @staticmethod
-    def calculate_velocity(dict_winddirection_radians:Dict[str,float], wind_direction, wind_speed ) -> float:
-        """Maps a wind direction and wind speed to a wind velocity
-
-        Args:
-            dict_winddirection_radians ([type]): A dictionary containing a mapping from wind direction (str) to radians
-            wind_direction (str): A str such as N or SE explaining the wind direction
-            wind_speed (float): 
-
-        Returns:
-            (str): wind velocity
-        """
-        assert ( wind_direction in list(dict_winddirection_radians.keys()) ) or np.isnan(wind_direction)
-        
-        radians = dict_winddirection_radians[wind_direction]
-        return wind_speed*math.cos(radians), wind_speed*math.sin(radians)
-
-    @staticmethod
-    def get_dataset(start_date:str="2008-12-01", end_date:str="2021-07-03",
-                    locations=['Albury'], lookback=6,
-                    train_val_test_split:list = [0.6,0.2,0.2],
-                    target_distribution_name:str="lognormal_hurdle", 
-                    target_range=(0,4),
-                    **kwargs ) -> Tuple:
-        """Creates a train, test and validation dataset for Australian Rain.
-
-        Args:
-            start_date (str, optional): [starting date, in format YYYY-MM-DD]. Defaults to "2008-12-01".
-            end_date (str, optional): [ending data, in format YYYY-MM-DD]. Defaults to "2021-07-03".
-            locations (list[str], optional): [List of locations to use in datasets]. Defaults to ['Albury'].
-            lookback (int, optional): [lookback to use]. Defaults to 6.
-            train_val_test_split (list, optional): Proportion of dataset to use for train/val/test set. Defaults to [0.6,0.2,0.2].
-            target_distribution_name (str, optional): [Distribution of target variable. This is used for ]. Defaults to "lognormal_hurdle".
-
-        Returns:
-            [tuple(Dataset, Dataset, Dataset, MinMaxScaler, None)]: train_dataset, val_dataset, test_dataset, features_scaler, target_scaler 
-        
-        Note: This class caches the datasets that it creates. Each dataset is unique in its combination of
-                'start_date','end_date','locations','lookback','train_val_test_split','target_distribution_name'
-        """
-        locations = sorted(locations)
-        assert all( loc in AustraliaRainDataset.locations for loc in locations), "Invalid Location chosen"
-        if len(locations) == 0:
-            locations = AustraliaRainDataset.locations
-        
-        # Retreiving record of previously created datasets
-        premade_dset_path = os.path.join('Data','australia_rain','premade_dset_record.txt')
-        if os.path.exists(premade_dset_path):
-            premade_dsets = pd.read_csv( premade_dset_path)
-        else:
-            premade_dsets = pd.DataFrame( columns=['path','start_date','end_date','locations','lookback','train_val_test_split','target_distribution_name','target_range'] )
-
-        # Query for if existing dataset is made
-        query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' and \
-                locations == '{ujson.dumps(locations)}' and \
-                lookback == {str(lookback)} and \
-                train_val_test_split == '{ujson.dumps(train_val_test_split)}' and \
-                target_distribution_name == '{target_distribution_name}' and \
-                target_range == '{target_range}'" )
-
-        if len(query_res)!=0:
-
-            with open(query_res['path'].iloc[0], "rb") as f:
-                pkl_dset_dict = pickle.load( f ) 
-            
-            concat_dset_train = pkl_dset_dict['concat_dset_train']
-            concat_dset_val = pkl_dset_dict['concat_dset_val']
-            concat_dset_test= pkl_dset_dict['concat_dset_test']
-            scaler_features = pkl_dset_dict['scaler_features']
-            scaler_target  = pkl_dset_dict['scaler_target']
-
-        else: 
-            # Make dataset from scratch
-            data = pd.read_csv("./Data/australia_rain/weatherAUS.csv")
-
-            # Adding Month and Day column
-            data.insert(loc=1, column='Month', value = data['Date'].apply(lambda x: x[5:7])) #create column "Month"
-            data.insert(loc=2, column='Day', value = data['Date'].apply(lambda x: x[7:10])) #create column
-
-            # Filtering dates included in datasets
-            data.Date = pd.to_datetime(data.Date)
-            data = data.loc[ (data.Date >=pd.Timestamp(start_date) ) & ( data.Date <= pd.Timestamp(end_date) ) ]
-            
-            # Adding Season feature
-            data.insert(loc=3, column='Season', value = data['Month'].replace(['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'], ['summer','summer', 'summer', 'fall', 'fall', 'fall', 'winter', 'winter', 'winter', 'spring', 'spring', 'spring'])) #create column "Season"
-            
-            # Converting WindGust into a vector
-            # Full list of Directions -> (N, NNE, NE, ENE, E, ESE, SE, SSE, S, SSw, SW, WSW, W, WWN, NW, NNW, N )
-            dict_winddirection_radians = {
-                'N':math.pi/2, 'NNE': math.pi/3 , 'NE':math.pi/4, 'ENE':math.pi/6, 'E':0, 'ESE':math.pi*(11/6), 'SE':math.pi*(7/4), "SSE":math.pi*(5/3), 
-                'S':math.pi*(3/2), 'SSW':math.pi*(4/3), 'SW':math.pi*(5/4), 'WSW':math.pi*(7/6), 'W':math.pi, 'WNW':math.pi*(5/6), 'NW':math.pi*(3/4), 'NNW':math.pi*(2/3),
-                np.nan:0
-            }
-            data[ ['WindGustU', 'WindGustV'] ] = data.apply( lambda row: AustraliaRainDataset.calculate_velocity( dict_winddirection_radians, row['WindGustDir'], row['WindGustSpeed'] ), axis=1, result_type='expand' )
-            data[['WindVelocity9amU', 'WindVelocity9amV']] = data.apply( lambda row: AustraliaRainDataset.calculate_velocity(dict_winddirection_radians, row['WindDir9am'], row['WindSpeed9am'] ), axis=1, result_type='expand' )
-            data[['WindVelocity3pmU', 'WindVelocity3pmV']] = data.apply( lambda row: AustraliaRainDataset.calculate_velocity(dict_winddirection_radians, row['WindDir3pm'], row['WindSpeed3pm'] ), axis=1., result_type='expand' )
-
-            # For each location, sorting values by date and stacking in alphabetical order  
-            li_dsets = []
-            for loc in locations:
-                dataset_loc = data[data.Location == loc ]
-                dataset_loc = dataset_loc.sort_values(by='Date')
-                li_dsets.append(dataset_loc)
-            
-            data = pd.concat(li_dsets)
-            data = data.reset_index(drop=True)
-
-            # Drop low quality columns
-            # # The variables Sunshine, Evaporation, Cloud3pm, Cloud9am were removed because they had a low fill percentage
-            # # Location was removed, since we want forecast rain regardless the location.
-            # # Date, Month, Day and were removed, because Season is going to be used instead.
-            # # RISK_MM was removed to avoid data leakage.
-            # # Rainfall and RainTomorrow are removed to replicate TRUNET settings
-            # # WindGustDir, WindGustSpeed, WindDir9am, WindSpeed9am, WindDir3pm, WindSpeed3pm are dropped since they have been replace continous velocity
-            data.set_index(['Date'], inplace=True, drop=True)
-
-            data_final_variables = data.drop(columns=['Sunshine','Evaporation','Cloud3pm','Cloud9am', 'Month', 'Day', 'RISK_MM','RainTomorrow',
-                                                        'WindGustDir', 'WindGustSpeed', 'WindDir9am', 'WindSpeed9am', 'WindDir3pm', 'WindSpeed3pm'],axis=1)
-            
-            data_final_variables = data_final_variables.dropna(axis=0)
-
-            targets_raw = data_final_variables[['RainToday','Rainfall','Location']]
-            features_raw = data_final_variables.drop(columns = ['RainToday','Rainfall']) 
-            
-
-            # Scaling Features
-            #:Ensure scaler features is only trained on training set
-            scaler_features = StandardScaler()
-
-            types_aux = pd.DataFrame(features_raw.dtypes)
-            types_aux.reset_index(level=0, inplace=True)
-            types_aux.columns = ['Variable','Type']
-            numerical_feature = list(types_aux[types_aux['Type'] == 'float64']['Variable'].values)
-
-            features_minmax_transform = pd.DataFrame(data = features_raw)
-
-            # training scaler only on train set            
-            end_train_date = pd.Timestamp(start_date) + pd.DateOffset(days=train_val_test_split[0]*(  pd.Timestamp(end_date) - pd.Timestamp(start_date) ).days) 
-            _ = features_raw[numerical_feature][ (features_raw[numerical_feature].index >=pd.Timestamp(start_date) ) &
-                                                      (features_raw[numerical_feature].index <= end_train_date) ]
-            scaler_features.fit( _ )
-            features_minmax_transform[numerical_feature] = scaler_features.transform(features_raw[numerical_feature])
-
-                # One Hot Encoding non numeric columns
-            location_column = features_minmax_transform['Location']
-            features_minmax_transform = features_minmax_transform.drop(columns=['Location'],axis=1)
-            features_final = pd.get_dummies(features_minmax_transform)
-            features_final['Location'] = location_column
-            
-            # Scaling Targets
-                # Scaling methodology is determined by the target distribution. 
-                # Note, specific distributions such as lognormal can not be scaled to 0,1 since they are not invariant under affine transformation 
-            scaler_target = MinMaxScaler( feature_range = target_range )
-
-            types_aux = pd.DataFrame(targets_raw.dtypes) 
-            types_aux.reset_index(level=0, inplace=True)
-            types_aux.columns = ['Variable','Type']
-            numerical_target = list(types_aux[types_aux['Type'] == 'float64']['Variable'].values)
-            target_transform = pd.DataFrame(data = targets_raw )
-            
-            if scaler_target is not None:
-                _ = targets_raw[numerical_target][ (targets_raw[numerical_target].index >= pd.Timestamp(start_date) ) &
-                                                      (targets_raw[numerical_target].index <= end_train_date) ]
-                scaler_target.fit( _ )
-
-                target_transform[numerical_target] = scaler_target.transform(targets_raw[numerical_target])
-
-            # replace "Yes","No" with binary
-            target_transform['RainToday'] = target_transform['RainToday'].replace(['Yes', 'No'], [1,0])
-            targets_final = target_transform
-
-            # Creating seperate datasets for each location
-            li_dsets_train = []
-            li_dsets_val   = []
-            li_dsets_test  = []
-
-            # For each location Creating, the train, validation
-            for loc in locations:
-                
-                X_loc = features_final[ features_final.Location == loc ]
-                Y_loc = targets_final[ targets_final.Location == loc ]
-                
-                start_train_date = pd.Timestamp(start_date)
-                end_train_date = start_val_date = start_train_date + pd.DateOffset(days=train_val_test_split[0]*(  pd.Timestamp(end_date) - pd.Timestamp(start_date) ).days) 
-                end_val_date = start_test_date = start_val_date + pd.DateOffset(days=train_val_test_split[1]*(  pd.Timestamp(end_date) - pd.Timestamp(start_date) ).days )
-                end_test_date = pd.Timestamp(end_date)
-
-                # Date filtering
-                X_train = X_loc.loc[ (X_loc.index >= start_train_date) & (X_loc.index <= end_train_date) ]
-                Y_train = Y_loc.loc[ (Y_loc.index >= start_train_date) & (Y_loc.index <= end_train_date) ]
-
-                X_val = X_loc.loc[ (X_loc.index >= start_val_date) & (X_loc.index <= end_val_date) ]
-                Y_val = Y_loc.loc[ (Y_loc.index >= start_val_date) & (Y_loc.index <= end_val_date) ]
-
-                X_test = X_loc.loc[ (X_loc.index >= start_test_date) & (X_loc.index <= end_test_date) ]
-                Y_test = Y_loc.loc[ (Y_loc.index >= start_test_date) & (Y_loc.index <= end_test_date) ]
-
-                # Dropping location column
-                X_train = X_train.drop(axis=1, labels=['Location'])
-                Y_train = Y_train.drop(axis=1, labels=['Location'])
-                X_val = X_val.drop(axis=1, labels=['Location'])
-                Y_val = Y_val.drop(axis=1, labels=['Location'])
-                X_test = X_test.drop(axis=1, labels=['Location'])
-                Y_test = Y_test.drop(axis=1, labels=['Location'])
-
-                if len(X_train)>0:
-                    dset_train = AustraliaRainDataset(X_train, Y_train, lookback, loc)
-                    li_dsets_train.append(dset_train)
-                
-                if len(X_val)>0:
-                    dset_val = AustraliaRainDataset(X_val, Y_val, lookback, loc)
-                    li_dsets_val.append(dset_val)
-                
-                if len(X_test)>0:
-                    dset_test = AustraliaRainDataset(X_test, Y_test, lookback, loc)
-                    li_dsets_test.append(dset_test)
-
-            concat_dset_train = torch.utils.data.ConcatDataset(li_dsets_train)
-            concat_dset_val = torch.utils.data.ConcatDataset(li_dsets_val)
-            concat_dset_test = torch.utils.data.ConcatDataset(li_dsets_test)
-
-            # Caching Dataset 
-            ## Create a number for this dataset
-            try:
-                new_dset_number = int( max( [ re.findall("(?<=/)\d+(?=.pkl)",path_)[0] for path_ in premade_dsets['path'].tolist() ], key=int) ) + 1
-            except ValueError:
-                new_dset_number = 0
-
-            os.makedirs(os.path.join('Data','australia_rain','premade_dsets'),exist_ok=True)
-            path_ = os.path.join('Data','australia_rain','premade_dsets', f'{str(new_dset_number)}.pkl')
-
-            with open(path_,"wb") as f:
-                pickle.dump({'concat_dset_train':concat_dset_train, 'concat_dset_val':concat_dset_val, 'concat_dset_test':concat_dset_test, 'scaler_features':scaler_features, 'scaler_target':scaler_target }, f  )
-            premade_dsets = premade_dsets.append( {'path':path_,
-                                    'start_date':start_date,
-                                    'end_date':end_date,
-                                    'locations':ujson.dumps(locations),
-                                    'lookback':str(lookback),
-                                    'train_val_test_split':ujson.dumps(train_val_test_split),
-                                    'target_distribution_name': target_distribution_name,
-                                    'target_range':str(scaler_target.feature_range)
-                                     } , ignore_index=True)
-            premade_dsets.to_csv(premade_dset_path, index=False)
-
-        return concat_dset_train, concat_dset_val, concat_dset_test, scaler_features, scaler_target
-    
-    @staticmethod
-    def parse_data_args(parent_parser):
-        parser = argparse.ArgumentParser(
-            parents=[parent_parser], add_help=True, allow_abbrev=False)
-
-        parser.add_argument("--input_shape", default=(19,) )
-        parser.add_argument("--output_shape", default=(1,) )
-        parser.add_argument("--lookback", default=7, type=int )
-        parser.add_argument("--locations", type= lambda _str:json.loads(_str), default=AustraliaRainDataset.valid_locations )
-        parser.add_argument("--min_rain_value",type=float, default=1.0)
-        
-        data_args = parser.parse_known_args()[0]
-        return data_args
-
-# region -- Era5_Eobs
+# region -- Era5_Eobs with Time
 class Generator():
     """
         Base class for Generator classes
@@ -766,7 +230,7 @@ class Generator():
     latitude_array = np.linspace(58.95, 49.05, 100)
     longitude_array = np.linspace(-10.95, 2.95, 140)
 
-    def __init__(self, fp, lookback, iter_chunk_size,
+    def __init__(self, fp, lookback=None, iter_chunk_size=None,
                  all_at_once=False, start_idx=0, end_idx=None,
                     dset_start_date=None, dset_time_freq=None, 
                     ):
@@ -780,7 +244,7 @@ class Generator():
             
         """ 
 
-        if iter_chunk_size%lookback!=0:
+        if lookback is not None and iter_chunk_size%lookback!=0:
             print("Iter chunk size must be a multiple of lookback to ensure that the samples we pass to model can be transformed to the correct shape")
             iter_chunk_size = lookback* int( ( iter_chunk_size+  lookback/2)//lookback )
 
@@ -789,7 +253,7 @@ class Generator():
         self.fp = fp
         
         # Retrieving information on temporal length of  dataset        
-        with nDataset(self.fp, "r+", format="NETCDF4") as ds:
+        with nDataset(self.fp, "r") as ds:
             if 'time' in ds.dimensions:
                 self.max_data_len = ds.dimensions['time'].size
             else:
@@ -805,7 +269,8 @@ class Generator():
 
         
         # Ensuring we end_idx is a multiple of lookback away 
-        self.end_idx = self.start_idx+ int(((self.end_idx-self.start_idx)//self.lookback)*self.lookback )
+        if self.lookback != None:
+            self.end_idx = self.start_idx+ int(((self.end_idx-self.start_idx)//self.lookback)*self.lookback )
 
         self.data_len_per_location = self.end_idx - self.start_idx
 
@@ -1094,7 +559,7 @@ class Generator_mf(Generator):
 
     def yield_iter(self):
         # xr_gn = xr.open_dataset(self.fp, cache=False, decode_times=False, decode_cf=False, cache=False, chunks={'time': self.iter_chunk_size})
-        with xr.open_dataset(self.fp, cache=True, decode_times=False, decode_cf=False ) as xr_gn:
+        with xr.open_dataset(self.fp, cache=True, decode_times=False, decode_cf=False) as xr_gn:
             idx = copy.deepcopy(self.start_idx)
 
             while idx < self.end_idx:
@@ -1118,36 +583,40 @@ class Generator_mf(Generator):
                 yield stacked_data[ :, 1:-2, 2:-2, :], stacked_masks[ :, 1:-2 , 2:-2, :] #(100,140,6) 
 
     __iter__ = yield_iter 
+
+
 class Era5EobsDataset(IterableDataset):
 
-    def __init__(self, dconfig, start_date, end_date, target_range,
+    def __init__(self, dconfig, start_date, end_date, 
         locations, loc_count, scaler_features=None, 
-        scaler_target=None, workers=1, shuffle=False, **kwargs ) -> None:
+        scaler_target=None, target_range=None, workers=1, shuffle=False, cache_gen_size=4, **kwargs ) -> None:
         super(Era5EobsDataset).__init__()
 
+        assert target_range is not None or scaler_target is not None
+        
         self.dconfig = dconfig
-        self.target_range = target_range
+        
         self.locations = locations if locations else dconfig.locations
         
         self.loc_count = loc_count
         
+        self.start_date = start_date
         self.end_date = end_date
         start_idx_feat, start_idx_tar = self.get_idx(start_date)
         end_idx_feat, end_idx_tar = self.get_idx(end_date)
         self.gen_size = kwargs.get('gen_size',40)
         self.workers = workers
         self.shuffle = shuffle
-        self.cache_gen_size = kwargs.get('cache_gen_size', 4)
+        self.cache_gen_size = cache_gen_size
         self.xarray_decode = kwargs.get('xarray_decode', False)
         
         # region Checking for pre-existing scalers - If not exists we create in next section
-        try:
-            trainer_dir = kwargs.get('trainer_dir')
-            self.scaler_features = scaler_features if scaler_features != None else pickle.load( open( os.path.join(trainer_dir,"scaler_features.pkl"),"rb") ) 
-            self.scaler_target = scaler_target if scaler_target != None else pickle.load( open( os.path.join(trainer_dir,"scaler_target.pkl"),"rb") ) 
-        except (FileExistsError, FileNotFoundError, Exception) as e:
-            self.scaler_features = None
-            self.scaler_target = None
+        self.scaler_features = scaler_features
+        
+        self.scaler_target = scaler_target 
+        
+        self.target_range = target_range if target_range is not None else tuple(scaler_target.feature_range)
+        
         # endregion
         
         # region Checking for cache of dataset 
@@ -1162,7 +631,7 @@ class Era5EobsDataset(IterableDataset):
         query_res = premade_dsets.query( f"start_date == '{start_date}' and end_date == '{end_date}' and \
                                     locations == '{Era5EobsDataset.locations_enc(self.locations, dconfig=self.dconfig)}' and \
                                     lookback == {str(self.dconfig.lookback_target)} and \
-                                    target_range == '{','.join(map(str,target_range))}' and \
+                                    target_range == '{','.join(map(str,self.target_range))}' and \
                                     outer_box_dims == '{','.join(map(str,dconfig.outer_box_dims))}'")
         
         #If it exists we just load it
@@ -1175,7 +644,7 @@ class Era5EobsDataset(IterableDataset):
         else:
             os.makedirs( os.path.join(dconfig.data_dir, "cache"), exist_ok=True )
             self.cache_path = os.path.join( self.dconfig.data_dir, "cache",
-                f"start-{start_date}-end-{end_date}_lbtarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,target_range))}-outer_box_dims-{','.join(map(str,dconfig.outer_box_dims))}-locs-{Era5EobsDataset.locations_enc(self.locations, dconfig=self.dconfig)}")
+                f"start-{start_date}-end-{end_date}_lbtarget-{str(self.dconfig.lookback_target)}-tgtrange-{','.join(map(str,self.target_range))}-outer_box_dims-{','.join(map(str,dconfig.outer_box_dims))}-locs-{Era5EobsDataset.locations_enc(self.locations, dconfig=self.dconfig)}")
             self.cache_exists = os.path.exists(self.cache_path)
         # endregion
 
@@ -1214,7 +683,7 @@ class Era5EobsDataset(IterableDataset):
                 'end_date':end_date,
                 'locations':  Era5EobsDataset.locations_enc(self.locations, dconfig=self.dconfig), # '_'.join([loc[:2] for loc in self.locations]),
                 'lookback':str(self.dconfig.lookback_target),
-                'target_range':','.join(map(str,target_range)),
+                'target_range':','.join(map(str,self.target_range)),
                 'outer_box_dims':','.join(map(str,dconfig.outer_box_dims) )
             }, ignore_index=True)
             
@@ -1243,10 +712,11 @@ class Era5EobsDataset(IterableDataset):
         return location_encoded
     
     @staticmethod
-    def get_dataset( dconfig, target_range, target_distribution_name,**kwargs):
+    def get_dataset( dconfig, target_range, target_distribution_name, **kwargs):
 
         ds_train = Era5EobsDataset( start_date = dconfig.train_start, end_date=dconfig.train_end,
                                     target_distribution_name=target_distribution_name,
+                                    cache_gen_size=dconfig.cache_gen_size,
                                     locations=dconfig.locations,
                                     loc_count=dconfig.loc_count,
                                     target_range=target_range, dconfig=dconfig, 
@@ -1254,6 +724,7 @@ class Era5EobsDataset(IterableDataset):
         
         ds_val = Era5EobsDataset( start_date = dconfig.val_start, end_date=dconfig.val_end,
                                     dconfig=dconfig,
+                                    cache_gen_size=dconfig.cache_gen_size,
                                     target_range=target_range,
                                     target_distribution_name=target_distribution_name,
                                     locations=dconfig.locations,
@@ -1262,30 +733,37 @@ class Era5EobsDataset(IterableDataset):
                                     scaler_target = ds_train.scaler_target,
                                     shuffle=False,
                                     **kwargs)
-            
+        
+        
         ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
                                     locations=dconfig.locations_test, loc_count=dconfig.loc_count_test,
+                                    cache_gen_size=dconfig.cache_gen_size_test,
                                     dconfig=dconfig,
                                     target_range=target_range,
                                     target_distribution_name=target_distribution_name,
                                     scaler_features = ds_train.scaler_features,
                                     scaler_target = ds_train.scaler_target,
                                     shuffle=False,
-                                    xarray_decode=True,
-                                    **kwargs)
+                                    xarray_decode=True
+                                    )
 
         return ds_train, ds_val, ds_test, ds_train.scaler_features, ds_train.scaler_target
     
     @staticmethod
-    def get_test_dataset( dconfig, target_range, target_distribution_name, scaler_features, scaler_target, **kwargs):
+    def get_test_dataset( dconfig, target_distribution_name, target_range=None , scaler_features=None, scaler_target=None, **kwargs):
 
-        ds_test = Era5EobsDataset( start_date=dconfig.test_start, end_date=dconfig.test_end,
-                                    locations=dconfig.locations_test, loc_count=dconfig.loc_count_test,
+
+        ds_test = Era5EobsDataset( start_date=dconfig.test_start,
+                                    end_date=dconfig.test_end,
+                                    locations=dconfig.locations_test, 
+                                    loc_count=dconfig.loc_count_test,
                                     dconfig=dconfig,
+                                    cache_gen_size=dconfig.cache_gen_size_test,
                                     target_range=target_range,
                                     target_distribution_name=target_distribution_name,
                                     scaler_features = scaler_features,
                                     scaler_target = scaler_target,
+                                    xarray_decode=True,
                                     shuffle=False,
                                     **kwargs)
 
@@ -1294,47 +772,73 @@ class Era5EobsDataset(IterableDataset):
     def __iter__(self):
         
         if self.cache_exists and self.scaler_features and self.scaler_target:
-            
-            # with xr.open_dataset( self.cache_path, decode_cf=self.xarray_decode, decode_times=self.xarray_decode,  cache=True ) as xr_cache:
-            with nDataset(self.cache_path, 'r') as xr_cache :
-                
-                # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
-                
-                if not hasattr(self, 'max_cache_len'):
+                        
+            with xr.open_dataset( self.cache_path, decode_cf=self.xarray_decode, decode_times=self.xarray_decode,  cache=True )\
+                if os.path.isfile(self.cache_path) else \
+                    xr.open_mfdataset( sorted(list( glob.glob(self.cache_path+"/*"))), 
+                                      decode_cf=self.xarray_decode, 
+                                      decode_times=self.xarray_decode,  
+                                        concat_dim='sample_idx',    
+                                        combine='nested',     
+                                        #coords=['sample_idx'],                             
+                                        cache=True ) as xr_cache:
+                                   
+                if not hasattr(self, 'cache_len'):
                     # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
-                    # self.max_cache_len = xr_cache["target"].shape[0]
-                    self.max_cache_len = xr_cache.dims['sample_idx']
-                    # self.max_cache_len = xr_cache.dimensions.sample_idx.size
+                    self.cache_len = xr_cache.dims['sample_idx']
                     
-
                 # Making sure its a multiple of lookback away from start idx
                 if not hasattr(self, 'cache_start_idx'):
                     self.cache_start_idx = 0
 
                 if not hasattr(self, 'cache_end_idx'):
-                    self.cache_end_idx = 0 + int(((self.max_cache_len - self.cache_start_idx)//self.lookback)*self.lookback )
-
-                if not hasattr(self, 'cache_len'):
-                    self.cache_len = self.cache_end_idx + 1 - self.cache_start_idx
+                    self.cache_end_idx = self.cache_start_idx + self.cache_len
                          
                 # Implementing more effecient shuffling method - base on choosing slices to extract at random 
                 # replaces holding buffer
-                li_slices = [ slice( idx , min( idx  + self.cache_gen_size, self.cache_end_idx) ) for idx in range(self.cache_start_idx, self.cache_end_idx, self.cache_gen_size ) ]
+                
+                lst = li_slices = [ slice( idx , min( idx  + self.cache_gen_size, self.cache_end_idx) ) for idx in range(self.cache_start_idx, self.cache_end_idx, self.cache_gen_size ) ]
+                
                 if self.shuffle == True:
-                    random.shuffle(li_slices)
-                for _slice in li_slices:
-                                    
-                    xr_cache_slice = xr_cache.isel(sample_idx=_slice).load()
+                    random.shuffle(lst)
                     
-                    dict_data = { name:torch.tensor( xr_cache_slice[name].data )
-                                    for name in ['input','target','mask','idx_loc_in_region'] }
+                # for _slice in li_slices:
+                for s in lst:
+                    
+                    # ======= xarray method
+                    if  isinstance(xr_cache, xr.Dataset):
+                    # xarray method
+                        xr_cache_slice = xr_cache.isel(sample_idx=s).load()
+                        
+                        dict_data = { name:torch.tensor( xr_cache_slice[name].data )
+                                        for name in ['input','target','mask','idx_loc_in_region'] }
 
-                    dict_data['li_locations'] = xr_cache_slice['li_locations'].data.tolist()
-                    try:
-                        dict_data['target_date_window'] = xr_cache_slice['target_date_window'].data
-                    except ValueError as e:
-                        dict_data['target_date_window'] = np.asarray(pd.date_range('1979', periods=0)).reshape((-1,7))
-
+                        dict_data['li_locations'] = xr_cache_slice['li_locations'].data.tolist()
+                        try:
+                            dict_data['target_date_window'] = xr_cache_slice['target_date_window'].data
+                        except ValueError as e:
+                            dict_data['target_date_window'] = np.asarray(pd.date_range('1979', periods=0)).reshape((-1,7))
+                    
+                    # ======== Netcdf4 method   
+                    elif isinstance(xr_cache, nDataset):            
+                        dict_data = {}
+                        
+                        dict_data['target'] = xr_cache['target'][s.start:s.end].data
+                        dict_data['mask'] = xr_cache['mask'][s.start:s.end].data
+                        dict_data['idx_loc_in_region'] = xr_cache['idx_loc_in_region'][s.start:s.end].data
+                        dict_data['input'] = xr_cache['input'][s.start:s.end].data
+                        try:
+                            dict_data['target_date_window'] = xr_cache['target_date_window'][s.start:s.end].data
+                        except Exception as e:
+                            dict_data['target_date_window'] = np.asarray(pd.date_range('1979', periods=0)).reshape((-1,7))
+                        dict_data['li_locations'] = xr_cache['li_locations'][s.start:s.end]
+                                                
+                        dict_data['target'] = torch.tensor( dict_data['target'] )
+                        dict_data['mask'] = torch.tensor( dict_data['mask'] )
+                        dict_data['idx_loc_in_region'] = torch.tensor( dict_data['idx_loc_in_region'] )
+                        dict_data['input'] = torch.tensor( dict_data['input'] )
+                        dict_data['li_locations'] = dict_data['li_locations'].tolist() 
+                     
                     if dict_data['target_date_window'].dtype != '<M8[ns]':
                         dict_data['target_date_window'] = dict_data['target_date_window'].astype('<M8[ns]')
                         
@@ -1348,9 +852,6 @@ class Era5EobsDataset(IterableDataset):
                     dict_data['input'] = dict_data['input'].to(torch.float16).squeeze(-1)
                     dict_data['target'] = dict_data['target'].to(torch.float16).squeeze(-1)
                     dict_data['mask'] = dict_data['mask'].to(torch.bool).squeeze(-1)
-
-                    # dict_data = { k:v for k,v in dict_data.items() }
-                    
                                             
                     li_dicts = [ {key:dict_data[key][i:i+1] if key not in ['li_locations','target_date_window'] else dict_data[key][i]
                                   for key in dict_data.keys()} for i in range(len(dict_data['target'])) ]
@@ -1366,11 +867,9 @@ class Era5EobsDataset(IterableDataset):
                         if target_sub_idx_increment>0:
                             li_dicts = self.cache_shuffle(li_dicts, target_sub_idx_increment, feature_sub_idx_increment )
 
-                    # Filter li_dicts that do not have any valid valuesju
+                    # Filter li_dicts that do not have any valid values
                     li_dicts = [ dict_ for dict_ in li_dicts if dict_['mask'].logical_not().any()]
                     
-                    #idx += adj_iter_chunk_size
-                              
                     yield from li_dicts
                         
         else: 
@@ -1427,11 +926,21 @@ class Era5EobsDataset(IterableDataset):
                         #pass
                         xr_curr = xr.Dataset( **kwargs )
                             
-                        if self.dconfig.memory_effecient == True:
-
+                        if self.dconfig.data_load_method == 'xarray_mult_files_on_disk':
+                            #make the folder
+                            os.makedirs(self.cache_path, exist_ok=True)
+                            curr_f_count = len(list(glob.glob( os.path.join(self.cache_path,"*") )))
+                            next_cache_fp = os.path.join( self.cache_path, "{:03d}".format(curr_f_count)+".nc" )
+                            # save to file
+                            comp = dict(zlib=True, complevel=9)
+                            encoding = {var: comp for var in xr_curr.data_vars if (True or var in ['input']) }
+                            xr_curr.to_netcdf(next_cache_fp, mode='w', encoding=encoding, unlimited_dims=['sample_idx'] )
+                            
+                        elif self.dconfig.data_load_method in ['netcdf4_single_file_on_disk']:
+                        
                             # Preventing Memory issues in case the file gets to big
                             # Append to a netcd4 file on disk                                
-                            nd4_ds = nDataset(self.cache_path, 'w', )
+                            nd4_ds = nDataset(self.cache_path, 'w', keepweakref=True )
                             
                             # Creating dimensions
                             for dim_name, dim_value  in kwargs['coords'].items():
@@ -1449,67 +958,93 @@ class Era5EobsDataset(IterableDataset):
                                 if arr.dtype in ['<M8[ns]']:
                                     arr = arr.astype(np.long)
 
-                                if val_name  in []: # ['input']:
-                                    nd4_ds.createVariable(val_name, arr.dtype, tuple_shape_val[0], zlib=True, complevel=1, shuffle=False  )
+                                if True or (val_name  in []): # ['input']:
+                                    nd4_ds.createVariable(val_name, arr.dtype, tuple_shape_val[0], zlib=True, complevel=4, shuffle=False  )
                                 else:
                                     nd4_ds.createVariable(val_name, arr.dtype, tuple_shape_val[0] )
                                 
-                                nd4_ds[val_name][:] = arr
+                                nd4_ds.variables[val_name][:] = copy.deepcopy(arr)
                                                                                                
                     elif idx!=0:
+                                                
+                        if self.dconfig.data_load_method == 'xarray_mult_files_on_disk':
+                            kwargs['coords'] = {
+                                "sample_idx": np.arange( int(xr_curr.sample_idx[-1].data), int(xr_curr.sample_idx[-1].data)+torch.concat(dict_data['input']).shape[0]),
+
+                                "lookback_feat": np.arange( self.dconfig.lookback_feature),
+                                "lookback_target": np.arange( self.dconfig.lookback_target),
+
+                                "h_feat": np.arange( dict_data['input'][0].shape[-3]),
+                                "w_feat": np.arange( dict_data['input'][0].shape[-2]),
+
+                                "h_target": np.arange( dict_data['target'][0].shape[-2]),
+                                "w_target": np.arange( dict_data['target'][0].shape[-1]),
+                                "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1]),
+
+                                "d": np.arange( dict_data['input'][0].shape[-1]),
+                            }
+                            xr_new = xr.Dataset( **kwargs)
                         
-                        #if self.dconfig.memory_effecient == False:
-                        kwargs['coords'] = {
-                            "sample_idx": np.arange( xr_curr.dims['sample_idx'], xr_curr.dims['sample_idx']+torch.concat(dict_data['input']).shape[0]),
-
-                            "lookback_feat": np.arange( self.dconfig.lookback_feature),
-                            "lookback_target": np.arange( self.dconfig.lookback_target),
-
-                            "h_feat": np.arange( dict_data['input'][0].shape[-3]),
-                            "w_feat": np.arange( dict_data['input'][0].shape[-2]),
-
-                            "h_target": np.arange( dict_data['target'][0].shape[-2]),
-                            "w_target": np.arange( dict_data['target'][0].shape[-1]),
-                            "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1]),
-
-                            "d": np.arange( dict_data['input'][0].shape[-1]),
-                        }
-
-                        xr_new = xr.Dataset( **kwargs)
-                        xr_curr = xr.concat( [ xr_curr, xr_new], dim="sample_idx", join="exact" )
-                        
-                        if self.dconfig.memory_effecient == True:
+                            curr_f_count = len(list(glob.glob( os.path.join(self.cache_path,"*") )))
+                            next_cache_fp = os.path.join( self.cache_path, "{:03d}.nc".format(curr_f_count) )
+                            xr_new.to_netcdf(next_cache_fp, mode='w', encoding=encoding, unlimited_dims=['sample_idx'] )
+                            xr_curr = xr_new
+                            gc.collect()
                             
-                            if xr_curr.dims['sample_idx'] < 55000: #30000
+                        elif self.dconfig.data_load_method in ['xarray_single_file_in_mem', 'netcdf4_single_file_on_disk']:
+                            
+                            kwargs['coords'] = {
+                                "sample_idx": np.arange( xr_curr.dims['sample_idx'], xr_curr.dims['sample_idx']+torch.concat(dict_data['input']).shape[0]),
+
+                                "lookback_feat": np.arange( self.dconfig.lookback_feature),
+                                "lookback_target": np.arange( self.dconfig.lookback_target),
+
+                                "h_feat": np.arange( dict_data['input'][0].shape[-3]),
+                                "w_feat": np.arange( dict_data['input'][0].shape[-2]),
+
+                                "h_target": np.arange( dict_data['target'][0].shape[-2]),
+                                "w_target": np.arange( dict_data['target'][0].shape[-1]),
+                                "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1]),
+
+                                "d": np.arange( dict_data['input'][0].shape[-1]),
+                            }
+                            xr_new = xr.Dataset( **kwargs)
+                            
+                                                          
+                            xr_curr = xr.concat( [ xr_curr, xr_new], dim="sample_idx", join="exact" )
+                            
+                            if self.dconfig.data_load_method == 'netcdf4_single_file_on_disk':
                                 
-                                continue
-                                
-                            # clear xr_curr and cache current data to dataset    
-                            else:
-                                for k in kwargs['data_vars'].keys():
-                                    nd4_ds[k][ nd4_ds[k].shape[0]:, ...] = xr_curr[k].data
-                                
-                                # resetting the xr_curr 
-                                xr_curr = xr.Dataset(
-                                    coords={
-                                        "sample_idx": np.arange( 0 ),
-                                        "lookback_feat": np.arange( self.dconfig.lookback_feature),
-                                        "lookback_target": np.arange( self.dconfig.lookback_target),
-                                        "h_feat": np.arange( dict_data['input'][0].shape[-3]),
-                                        "w_feat": np.arange( dict_data['input'][0].shape[-2]),
-                                        "d": np.arange( dict_data['input'][0].shape[-1]),
-                                        "h_target": np.arange( dict_data['target'][0].shape[-2]),
-                                        "w_target": np.arange( dict_data['target'][0].shape[-1]),
-                                        "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] )
-                                        },
-                                    data_vars={                                
-                                            'input': (("sample_idx","lookback_feat","h_feat","w_feat","d"), np.zeros_like( np.concatenate(dict_data['input']))[:0]),
-                                            "target": (("sample_idx","lookback_target","h_target","w_target"), np.zeros_like( np.concatenate(dict_data['target']) )[:0] ),
-                                            "mask": (("sample_idx","lookback_target","h_target","w_target"), np.zeros_like( np.concatenate(dict_data['mask']))[:0]),
-                                            "idx_loc_in_region":(("sample_idx","h_w"), np.zeros_like( np.concatenate(dict_data['idx_loc_in_region']))[:0]),
-                                            "li_locations":(("sample_idx","lookback_target"), np.zeros_like( np.concatenate(dict_data['li_locations']))[:0] ),
-                                            "target_date_window": ( ("sample_idx",'lookback_target'),np.zeros_like( np.concatenate(dict_data['target_date_window']) )[:0] )
-                                        } )
+                                if xr_curr.dims['sample_idx'] < 55000: #30000
+                                    
+                                    continue
+                                    
+                                # clear xr_curr and cache current data to dataset    
+                                else:
+                                    for k in kwargs['data_vars'].keys():
+                                        nd4_ds.variables[k][ nd4_ds[k].shape[0]:, ...] = copy.deepcopy(xr_curr[k].data)
+                                    
+                                    # resetting the xr_curr 
+                                    xr_curr = xr.Dataset(
+                                        coords={
+                                            "sample_idx": np.arange( xr_curr.dimensions.sample_idx.size, ) ,
+                                            "lookback_feat": np.arange( self.dconfig.lookback_feature),
+                                            "lookback_target": np.arange( self.dconfig.lookback_target),
+                                            "h_feat": np.arange( dict_data['input'][0].shape[-3]),
+                                            "w_feat": np.arange( dict_data['input'][0].shape[-2]),
+                                            "d": np.arange( dict_data['input'][0].shape[-1]),
+                                            "h_target": np.arange( dict_data['target'][0].shape[-2]),
+                                            "w_target": np.arange( dict_data['target'][0].shape[-1]),
+                                            "h_w": np.arange( dict_data['idx_loc_in_region'][0].shape[-1] )
+                                            },
+                                        data_vars={                                
+                                                'input': (("sample_idx","lookback_feat","h_feat","w_feat","d"), np.zeros_like( np.concatenate(dict_data['input']))[:0]),
+                                                "target": (("sample_idx","lookback_target","h_target","w_target"), np.zeros_like( np.concatenate(dict_data['target']) )[:0] ),
+                                                "mask": (("sample_idx","lookback_target","h_target","w_target"), np.zeros_like( np.concatenate(dict_data['mask']))[:0]),
+                                                "idx_loc_in_region":(("sample_idx","h_w"), np.zeros_like( np.concatenate(dict_data['idx_loc_in_region']))[:0]),
+                                                "li_locations":(("sample_idx","lookback_target"), np.concatenate(dict_data['li_locations']))[:0] ,
+                                                "target_date_window": ( ("sample_idx",'lookback_target'),np.zeros_like( np.concatenate(dict_data['target_date_window']) )[:0] )
+                                            } )
                                 
                                                             
                 if bool_update_scaler_features: 
@@ -1549,19 +1084,20 @@ class Era5EobsDataset(IterableDataset):
              
             if not self.cache_exists:
                 
-                if self.dconfig.memory_effecient == True:
+                if self.dconfig.data_load_method in ['netcdf4_single_file_on_disk']:
                     for k in kwargs['data_vars'].keys():
-                        nd4_ds[k][ nd4_ds[k].shape[0]: , ...] = xr_curr[k].data
+                        nd4_ds[k][ nd4_ds[k].shape[0]: , ...] = copy.deepcopy(xr_curr[k].data)
                     
                     # Now to set the length of the sample_idx dimension
-                    
                     nd4_ds.close()
+                    del nd4_ds
+                    del kwargs['data_vars']
+                    gc.collect()
                     
-                else:
+                elif self.dconfig.data_load_method in ['xarray_single_file_in_mem']:
                     comp = dict(zlib=True, complevel=9)
-                    encoding = {var: comp for var in xr_curr.data_vars if var in ['input']}
+                    encoding = {var: comp for var in xr_curr.data_vars if (True or var in ['input']) }
                     xr_curr.to_netcdf(self.cache_path, mode='w', encoding=encoding )
-                    a=1
                 
             # Implement a scheme that saves the cache in chunks to prevent it getting too large for memory
             # - check if you can append a array to one in memory without loding into RAM
@@ -1577,7 +1113,9 @@ class Era5EobsDataset(IterableDataset):
 
         # Unbundling each variable for each location
         # Converting it into one long sequence for each variable for a location instead of chunks of 7 day data
-        for loc in self.locations:
+        locations = self.locations if self.locations != ['All'] else Generator.get_locs_for_whole_map( self.dconfig)
+        locations = list(map(str,locations))
+        for loc in locations:
             loc_dict = OrderedDict()
 
             try:
@@ -1647,17 +1185,12 @@ class Era5EobsDataset(IterableDataset):
         # Creating a list of dicts structure - where each dict contains data for one 7 day period
         for key in keys:
             li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
-            # if key in ['target','mask']:
-            #     li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
-            # elif key in ['input']:
-            #     li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
-            # elif key in ['idx_loc_in_region']:
-            #     li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
-            # elif key == ['li_locations']:
-            #     li_datums = sum( [ dict_loc_batched[loc][key] for loc in dict_loc_batched.keys() ], [] )
 
             for idx in range(count):
                 li_dicts_shuffled[idx][key] = li_datums[idx]
+            # for idx, shuffled_idx in enumerate():
+            #     li_dicts_shuffled[idx][key] = li_datums[shuffled_idx]
+        random.shuffle(li_dicts_shuffled) 
         
         return li_dicts_shuffled
 
@@ -1677,6 +1210,7 @@ class Era5EobsDataset(IterableDataset):
         if normalize:
             feature = (feature-self.feature_mean )/self.features_scale
         feature.masked_fill_( feature_mask, self.dconfig.mask_fill_value['model_field'])
+        # feature.masked_fill_( target_mask, self.dconfig.mask_fill_value['model_field'])
 
         # Preparing Eobs and target_rain_data
         target = target.view(-1, self.dconfig.lookback_target, *target.shape[-2:] ) #( bs, target_periods ,h1, w1, target_dim)
@@ -1822,21 +1356,37 @@ class Era5EobsDataset(IterableDataset):
 
     def create_cache_params(self):
         
-        with xr.open_dataset( self.cache_path, cache=True ) as xr_cache:
-            # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
+        if os.path.isfile(self.cache_path):
+            with xr.open_dataset( self.cache_path, cache=True ) as xr_cache:
+                # for feature, target, target_mask, idx_loc_in_region in self.cached_data:
+                if not hasattr(self,'cache_len'):
+                    self.cache_len = xr_cache.dims['sample_idx']
+        
+        elif os.path.isdir(self.cache_path):
+            # aggregating lengths of all files
             if not hasattr(self,'max_cache_len'):
-                self.max_cache_len = xr_cache["target"].shape[0]
-
+                
+                with xr.open_mfdataset( sorted(list( glob.glob(self.cache_path+"/*"))), 
+                                      decode_cf=self.xarray_decode, 
+                                      decode_times=self.xarray_decode,  
+                                        concat_dim='sample_idx',    
+                                        combine='nested',     
+                                        #coords=['sample_idx'],                             
+                                        cache=True ) as xr_cache:
+                    self.cache_len = xr_cache.dims['sample_idx']
+                    
+        gc.collect()
+        
         # Making sure its a multiple of lookback away from start idx
         if not hasattr(self,'cache_start_idx'):
             self.cache_start_idx = 0
         if not hasattr(self,'cache_end_idx'):
-            if self.shuffle:
-                self.cache_end_idx = 0 + int(((self.max_cache_len - self.cache_start_idx)//self.dconfig.lookback_target)*self.dconfig.lookback_target )
-            else:
-                self.cache_end_idx = 0 + self.max_cache_len
-        if not hasattr(self,'cache_len'):
-            self.cache_len = self.cache_end_idx + 1 - self.cache_start_idx
+            # if self.shuffle:
+            #     self.cache_end_idx = 0 + int(((self.max_cache_len - self.cache_start_idx)//self.dconfig.lookback_target)*self.dconfig.lookback_target )
+            # else:
+            self.cache_end_idx = 0 + self.cache_len
+        # if not hasattr(self,'cache_len'):
+        #     self.cache_len = self.cache_end_idx + 1 - self.cache_start_idx
 
     @staticmethod
     def worker_init_fn(worker_id:int):
@@ -1855,11 +1405,11 @@ class Era5EobsDataset(IterableDataset):
             raise ValueError
 
         if ds.cache_exists:
-            per_worker = ds.cache_len//worker_count
-            ds.cache_start_idx = per_worker * worker_id
-            ds.cache_end_idx = per_worker * ( worker_id + 1)
+            per_worker = ds.cache_len // worker_count
+            ds.cache_start_idx =  per_worker * worker_id
+            ds.cache_end_idx = per_worker * ( worker_id + 1 ) if (worker_id+1!=worker_count) else ds.cache_len
             ds.cache_len_per_worker = per_worker
-        
+            
         else:
             # Changing the start_idx and end_idx in the underlying generators
             mf_data_len_per_location = ds.mf_data.start_idx - ds.mf_data.end_idx
@@ -1887,8 +1437,9 @@ class Era5EobsDataset(IterableDataset):
         parser.add_argument("--input_shape", default=(6,), type=tuple_type ) #TODO: need to roll together input_shape and outer_box_dim logic into one variable. Currently it only refers to the channel depth variable 
         parser.add_argument("--output_shape", default=(1,1), type=tuple_type ) #NOTE: this refers to the depth of the output i.e. do we predict mean and var term or just mean
 
-        parser.add_argument("--locations", nargs='+', required=True)
-        parser.add_argument("--locations_test", nargs='+', required=False, default=["London","Cardiff","Glasgow","Manchester","Birmingham","Liverpool","Edinburgh","Dublin","Preston","Truro","Bangor","Plymouth","Norwich","StDavids","Salford","Hull" ] )
+        parser.add_argument("--locations", nargs='+', required=False, default=[])
+        parser.add_argument("--locations_test", nargs='+', required=False, 
+                                default=[] )
 
         parser.add_argument("--data_dir", default="./Data/uk_rain", type=str)
         parser.add_argument("--rain_fn", default="eobs_true_rainfall_197901-201907_uk.nc", type=str)
@@ -1914,11 +1465,18 @@ class Era5EobsDataset(IterableDataset):
 
         parser.add_argument("--min_rain_value", type=float, default=0.5)
         parser.add_argument("--gen_size", type=int, default=8, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--gen_size_test", type=int, default=480, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
         parser.add_argument("--cache_gen_size", type=int, default=4, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--cache_gen_size_test", type=int, default=140, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        
         parser.add_argument("--shuffle", type=lambda x: bool(int(x)), default=True, choices=[0,1] )
-        parser.add_argument("--memory_effecient", type=lambda x: bool(int(x)), default=False, choices=[0,1] )
+        
+        # parser.add_argument("--memory_effecient", type=lambda x: bool(int(x)), default=False, choices=[0,1] )
+        parser.add_argument("--data_load_method", type=str, default='xarray_mult_files_on_disk', 
+                            choices=['xarray_mult_files_on_disk', 'xarray_single_file_in_mem', 'netcdf4_single_file_on_disk'])
         
         dconfig = parser.parse_known_args()[0]
+        
         dconfig.locations = sorted(dconfig.locations)
         dconfig.locations_test = sorted(dconfig.locations_test)
         
@@ -1957,7 +1515,10 @@ class Era5EobsDataset(IterableDataset):
         test_start_date = np.datetime64(dconfig.test_start,'D')
         test_end_date = (pd.Timestamp(dconfig.test_end) - pd.DateOffset(seconds=1) ).to_numpy()
 
-        if dconfig.locations[0][:13] == "WholeMapSplit":
+        if len(dconfig.locations)== 0:
+            pass
+        
+        elif dconfig.locations[0][:13] == "WholeMapSplit":
             all_hw_idxs = Generator.get_locs_for_whole_map(dconfig)
             
             train_prop, test_prop = dconfig.locations[0][14:].split('_')
@@ -1980,9 +1541,29 @@ class Era5EobsDataset(IterableDataset):
             
         elif dconfig.locations[0] == "All_Cities":
             dconfig.locations = sorted( list( Generator.city_latlon.keys() ) )
-                                          
+          
+        if len(dconfig.locations_test)==0:
+            pass
+                                     
+        elif dconfig.locations_test[0][:13] == "WholeMapSplit":
+            all_hw_idxs = Generator.get_locs_for_whole_map(dconfig)
+            
+            train_prop, test_prop = dconfig.locations[0][14:].split('_')
+            train_prop = float(train_prop)/100
+            test_prop = float(test_prop)/100
+            
+            train_count = int( len(all_hw_idxs) * train_prop )
+            test_count = int( len(all_hw_idxs) * test_prop )
 
-        if dconfig.locations_test[0] == "All_Cities":
+            #For reproducibility
+            random.seed(24)
+            train_test_group = random.sample( all_hw_idxs , train_count + test_count ) 
+            random.seed(24)
+            random.shuffle(train_test_group)
+                        
+            train_group, test_group = train_test_group[:train_count], train_test_group[ train_count: ]
+            
+        elif dconfig.locations_test[0] == "All_Cities":
             dconfig.locations_test = sorted( list( Generator.city_latlon.keys() ) )
 
 
@@ -2060,7 +1641,269 @@ class Era5EobsDataset(IterableDataset):
         tensor = torch.where(mask, tensor, mask_val)
 
         return tensor
+# endregion
 
-# endrefion
-MAP_NAME_DSET = {'toy':ToyDataset, 'australia_rain':AustraliaRainDataset, 'uk_rain':Era5EobsDataset }
+class Era5EobsTopoDataset_v2(Dataset):
+    """
+        This version extends Era5EobsDataset in the following ways:
+            - The Generator_mf returns the un-upscaled 20x24 model fields map of the UK
+            - Also Attachs the topology of the UK as an output
+            - The output of the generator includes the un-upscaled 20x24 modelfields
+            
+        Similar to before
+            - outputs Era5 rain
 
+    """
+    
+    def __init__(self, start_date, end_date,  
+                    dconfig,
+                    xarray_decode=False,
+                    scaler_features=None,
+                    scaler_target=None,
+                    scaler_topo=None
+                    ) -> None:
+        super().__init__()
+
+        self.path_to_rain = '/mnt/Data1/akann1w0w1ck/NeuralGLM/Data/uk_rain/eobs_true_rainfall_197901-201907_uk.nc'
+        self.path_to_elevation = '/mnt/Data1/akann1w0w1ck/NeuralGLM/Data/uk_rain/topo_0.1_degree.grib'
+        self.path_to_fields = '/mnt/Data1/akann1w0w1ck/NeuralGLM/Data/uk_rain/model_fields_1979-2019.nc'
+        self.dconfig = dconfig
+        self.xarray_decode = xarray_decode
+        
+        start_date_idx_mf, start_date_idx_rain = self.get_idx(start_date)
+        end_date_idx_mf, end_date_idx_rain = self.get_idx(end_date)
+        
+        self.max_data_len_rain = xr.open_dataset(self.path_to_rain, decode_times=False, decode_cf=False)['time'].size
+        self.start_idx_rain = start_date_idx_rain 
+        self.end_idx_rain = end_date_idx_rain if end_date_idx_rain else self.start_idx_rain + self.max_data_len_rain
+    
+        self.max_data_len_mf = xr.open_dataset(self.path_to_fields, decode_times=False, decode_cf=False)['time'].size
+        self.start_idx_mf = start_date_idx_mf
+        self.end_idx_mf = end_date_idx_mf if end_date_idx_mf else self.start_idx_mf + self.max_data_len_mf
+        
+        self.rain_dset_time_freq = 'D'
+        self.rain_date_range = np.asarray( pd.date_range( start= start_date, periods=self.max_data_len_rain, freq=self.rain_dset_time_freq, normalize=True  ) )
+
+        self.mf_dset_time_freq = '6H'
+        self.mf_date_range = np.asarray( pd.date_range( start= start_date, periods=self.max_data_len_mf, freq=self.mf_dset_time_freq, normalize=True  ) )
+        self.vars_for_feature = ['unknown_local_param_137_128', 'unknown_local_param_133_128', 'air_temperature', 'geopotential', 'x_wind', 'y_wind' ]       
+        
+        self.scaler_features=scaler_features
+        self.scaler_target=scaler_target
+        self.scaler_topo=scaler_topo
+                    
+        self.load_dataset_rain()
+        self.load_dataset_mf()
+        self.load_dataset_topo()
+    
+    @lru_cache
+    def __len__(self, ):
+        return len(self.rain_data)
+        
+    def __getitem__(self, idx):
+                    
+        # Input
+        feature = torch.tensor(self.mf_data[idx*4 : idx*4+4])
+        feature_mask = torch.tensor(self.mf_mask[idx*4 : idx*4+4])
+        
+        feature = (feature-self.features_mean )/self.features_scale
+        feature.masked_fill_( feature_mask, self.dconfig.mask_fill_value['model_field'])
+        
+        topo = torch.tensor(self.topo_data[None,... ])
+        topo = topo * self.scaler_topo_scale_
+        
+        # Target
+        target = torch.tensor(self.rain_data[idx:idx+1])
+        target_mask = torch.tensor(self.rain_mask[idx:idx+1])
+        target_windows = self.rain_date_windows[idx:idx+1]
+        
+        target = target*self.target_scale
+        target.masked_fill_(target_mask, self.dconfig.mask_fill_value['rain'] )
+
+        # Score        
+        dict_data = { 'fields':feature, 'rain':target, 'topo':topo,
+                        'mask':target_mask, 'target_date_window':target_windows
+                        }
+
+        return dict_data #'input','target','mask','idx_loc_in_region','li_locations','target_date_window'
+    
+    def load_dataset_rain(self):
+        slice_t = slice( self.start_idx_rain, self.end_idx_rain )
+        slice_h = slice( None , None, -1 )
+        slice_w = slice( None, None )
+        date_windows  = np.asarray( self.rain_date_range[slice_t] )
+        
+        with xr.open_dataset( self.path_to_rain, decode_times=self.xarray_decode, decode_cf=self.xarray_decode ) as xr_gn:
+            marray = xr_gn.isel(time=slice_t ,latitude=slice_h, longitude=slice_w)['rr'].to_masked_array(copy=True)
+            array, mask = np.ma.getdata(marray), np.ma.getmask(marray)
+            mask = (array==9.969209968386869e+36)
+        
+            self.rain_data = array
+            self.rain_mask = mask
+            self.rain_date_windows = date_windows
+        
+        if getattr(self, 'scaler_target',False) is None:
+            self.scaler_target = MinMaxScaler(feature_range=(0,2))
+            self.scaler_target.fit( array[~mask].reshape(-1,1) )
+            # self.scaler_target.fit(  torch.masked_select(array, torch.logical_not(mask) )  )
+        self.target_scale = torch.as_tensor( self.scaler_target.scale_ )
+        
+    def load_dataset_mf(self):
+        slice_t = slice( self.start_idx_mf, self.end_idx_mf )
+        slice_h = slice( None , None )
+        slice_w = slice( None, None )
+        date_windows  = np.asarray( self.mf_date_range[slice_t] )
+        
+        with xr.open_dataset( self.path_to_fields, decode_times=False, decode_cf=False ) as xr_gn:
+            
+            marray = [ xr_gn[name].to_masked_array(copy=True) for name in self.vars_for_feature  ]
+            list_datamask = [(np.ma.getdata(_mar), np.ma.getmask(_mar)) for _mar in marray]
+            _data, _masks = list(zip(*list_datamask))
+            
+            stacked_data = np.stack(_data, axis=-1)
+            stacked_masks = np.stack(_masks, axis=-1)
+                        
+            self.mf_data = stacked_data[ :, :, :, :]
+            self.mf_mask = stacked_masks[ :, :, :, :]
+
+        if getattr(self, 'scaler_features', False) is None:
+            self.scaler_features = StandardScaler()
+            self.scaler_features.fit(  self.mf_data.reshape(-1, len(self.vars_for_feature) )  )
+        
+        self.features_scale = torch.as_tensor( self.scaler_features.scale_ )
+        self.features_mean = torch.as_tensor( self.scaler_features.mean_ )
+    
+    def load_dataset_topo(self):
+                
+        with xr.open_dataset( self.path_to_elevation, engine='cfgrib', decode_times=False, decode_cf=False ) as xr_gn:            
+            marray = xr_gn['z'].to_masked_array(copy=True)
+            array,_ = np.ma.getdata(marray), np.ma.getmask(marray)
+                                    
+            self.topo_data = array[ 2:-2, 2:-2]
+        
+        if getattr(self, 'scaler_topo', False) is None:
+            self.scaler_topo = MinMaxScaler(feature_range=(0,2))
+            self.scaler_topo.fit(self.topo_data.reshape(-1, 1))
+            
+        self.scaler_topo_scale_ = torch.as_tensor(self.scaler_topo.scale_)
+    
+    def get_idx(self, date:Union[np.datetime64,str]):
+        """ Returns two indexes
+                The first index is the idx at which to start extracting data from the feature dataset
+                The second index is the idx at which to start extracting data from the target dataset
+            Args:
+                start_date (np.datetime64): Start date for evaluation
+            Returns:
+                tuple (int, int): starting index for the feature, starting index for the target data
+        """        
+
+        if type(date)==str:
+            date = np.datetime64(date)
+            
+        feature_start_date = self.dconfig.feature_start_date
+        target_start_date = self.dconfig.target_start_date
+
+        feat_diff = np.timedelta64(date - feature_start_date,'6h').astype(int)
+        tar_diff = np.timedelta64(date - target_start_date, 'D').astype(int)
+
+        feat_idx = feat_diff #since the feature comes in four hour chunks
+        tar_idx = tar_diff 
+
+        return feat_idx, tar_idx    
+    
+
+    @staticmethod
+    def get_datasets( dconfig, **kwargs):
+
+        ds_train = Era5EobsTopoDataset_v2( start_date = dconfig.train_start, 
+                                    end_date=dconfig.train_end,
+                                    dconfig=dconfig,
+                                    # dconfig=dconfig,
+                                    )
+        
+        ds_val = Era5EobsTopoDataset_v2( start_date=dconfig.val_start,
+                                        dconfig=dconfig,
+                                        end_date=dconfig.val_end,
+                                        
+                                        scaler_features= ds_train.scaler_features,
+                                        scaler_target=ds_train.scaler_target,
+                                        scaler_topo=ds_train.scaler_topo
+                                        )
+        
+        
+        ds_test = Era5EobsTopoDataset_v2( start_date=dconfig.test_start, 
+                                         end_date=dconfig.test_end,
+                                        dconfig=dconfig,
+                                        
+                                        scaler_features= ds_train.scaler_features,
+                                        scaler_target=ds_train.scaler_target,
+                                        scaler_topo=ds_train.scaler_topo,
+                                        xarray_decode=True
+                                        )
+
+        return ds_train, ds_val, ds_test, ds_train.scaler_features, ds_train.scaler_target, ds_train.scaler_topo
+    
+    @staticmethod
+    def collate_fn( batch ):
+        
+        fields = torch.concat([ d['fields'] for d in batch ], 0)
+        rain = torch.concat([ d['rain'] for d in batch ], 0)
+        topo = torch.concat([ d['topo'] for d in batch ], 0)
+        mask = torch.concat([ d['mask'] for d in batch ], 0)
+        target_date_window = np.concatenate([ d['target_date_window'] for d in batch ], 0)
+        
+        dict_data = { 'fields':fields, 'rain':rain, 'topo':topo,             
+                     'mask':mask, 'target_date_window':target_date_window }
+        
+        return dict_data
+        
+    @staticmethod
+    def parse_data_args(parent_parser=None, ):
+        
+        if parent_parser != None:
+            parser = argparse.ArgumentParser(
+                parents=[parent_parser], add_help=True, allow_abbrev=False)
+        else:
+            parser = argparse.ArgumentParser( add_help=True, allow_abbrev=False )
+
+        # parser.add_argument("--original_uk_dim", default=(100,140) )
+        parser.add_argument("--input_shape", default=(6,), type=tuple_type ) #TODO: need to roll together input_shape and outer_box_dim logic into one variable. Currently it only refers to the channel depth variable 
+        parser.add_argument("--output_shape", default=(1,1), type=tuple_type ) #NOTE: this refers to the depth of the output i.e. do we predict mean and var term or just mean
+
+        # parser.add_argument("--data_dir", default="./Data/uk_rain", type=str)
+        # parser.add_argument("--rain_fn", default="eobs_true_rainfall_197901-201907_uk.nc", type=str)
+        # parser.add_argument("--mf_fn", default="model_fields_1979-2019.nc", type=str)
+
+        parser.add_argument("--train_start", type=str, default="1979")
+        parser.add_argument("--train_end", type=str, default="1993-07")
+
+        parser.add_argument("--val_start", type=str, default="1993-07")
+        parser.add_argument("--val_end", type=str, default="1999")
+
+        parser.add_argument("--test_start", type=str, default="1999")
+        parser.add_argument("--test_end", type=str, default="2009")
+        parser.add_argument("--gen_size", type=int, default=8, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+
+        dconfig = parser.parse_known_args()[0]
+        
+        dconfig = Era5EobsTopoDataset_v2.add_fixed_args(dconfig)
+        
+        return dconfig
+    
+    @staticmethod
+    def add_fixed_args(dconfig):
+        dconfig.mask_fill_value = {"rain":0.0,
+                                    "model_field":0.0 }
+        
+        dconfig.vars_for_feature = ['unknown_local_param_137_128', 'unknown_local_param_133_128', 'air_temperature', 'geopotential', 'x_wind', 'y_wind' ]
+                
+        dconfig.target_start_date = np.datetime64('1950-01-01') + np.timedelta64(10592,'D')
+        dconfig.feature_start_date = np.datetime64('1970-01-01') + np.timedelta64(78888, 'h')
+        
+        return dconfig
+    
+MAP_NAME_DSET = {
+    # "toy":None,
+    # "australia_rain":None,
+    "uk_rain":Era5EobsDataset
+}

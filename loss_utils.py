@@ -16,6 +16,7 @@ from typing import Callable, Optional
 import math
 import numpy as np
 
+# Distributional Losses Torch Classes
 class LogNormalHurdleNLLLoss(_Loss):
     """A log normal distribution LN(\mu, disp) with \mu,disp \in [0, \inf] 
 
@@ -371,7 +372,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         C = L*mu.pow(1-p)*(1-p).pow(-1) - mu.pow(2-p)*(2-p).pow(-1)
         C *=  theta.pow(-1)
 
-        #------------- Version 2 - using 0<j<=12
+        #------------- Version 2 - using 0<j<=12 (ADE)
         if self.cp_version == 2:
             j = self.j
                        
@@ -404,7 +405,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
             ll = A + B + C
             
-        #------------- Version 4 - Use a window around J* and stirling approximation (acc use Goson approx)
+        #------------- Version 4 - Use a window around J* and stirling approximation (acc use Goson approx) (ADE)
         elif self.cp_version == 4:
 
             with torch.no_grad():
@@ -587,3 +588,123 @@ class CompoundPoissonGammaNLLLoss(_Loss):
                             'pred_r10mse': pred_r10mse.detach()
                              }
         return pred_metrics
+    
+# Wasserstein, CRPS,MSE
+
+class VAEGANLoss():
+    
+    def __init__( self,
+        content_loss = True,
+        content_loss_name = None,#'ensmeanMSE_phys' #TODO: check which one is used ,
+        enemble_size = None,
+        kl_weight= None, #TODO: find the kl weight
+        cl_weight= None #TODO,
+        
+        ):
+        
+        self.use_content_loss = content_loss
+        self.enemble_size = enemble_size
+        self.kl_weight = kl_weight
+        self.cl_weight = cl_weight
+        
+        self.content_loss_name = content_loss_name
+        self.content_loss_fct = CL_chooser(self.content_loss_name)
+         
+    def __call__(self, score, score_pred, z_mean=None, z_logvar=None, mask=None,
+                 net=None, constant_field=None ):
+        
+        b, *_ = score.shape
+
+        # applying mask for loss and evaluation metrics
+        # score_pred_masked      = torch.masked_select(score_pred, (mask ) )
+        # score_masked   = torch.masked_select(score, (mask ) )
+        # z_mean_masked   = torch.masked_select(z_mean, (mask ) )
+        # z_logvar_masked   = torch.masked_select(z_logvar, (mask ) )
+        
+        # vaegen_loss = torch.mean(score_masked*score_pred_masked, dim=-1) #wasserstein 
+        
+        vaegen_loss = self.wasserstein(score, score_pred)
+        total_loss = vaegen_loss
+        # kl_loss = -0.5 * (1 + z_logvar_masked - z_mean_masked.pow(2)- torch.exp(z_logvar_masked) )
+        # kl_loss = kl_loss.mean() * batch_size # kl_loss per datum in batch
+        
+        if z_logvar is not None:
+            kl_loss = self.kl_loss(z_logvar, z_mean, b)
+            
+            total_loss += kl_loss*self.kl_weight
+        
+        if self.use_content_loss == True:
+            content_loss = self.content_loss( z_mean, z_logvar, constant_field, net, mask)
+            
+            # score_pred_ = [ net.decoder( z_mean, z_logvar, constant_field ) for ii in range(self.ensemble_size) ]
+            # score_pred_ = torch.stack(score_pred_, axis=-1)  #  batch x W x H x 1 x ens
+            # score_pred_ = score_pred_.squeeze(-2)  #  batch x W x H x ens
+            
+            # content_loss  = self.content_loss_fct(score, score_pred_)
+            
+            total_loss += self.cl_weight*content_loss
+        
+        return total_loss
+    
+    def wasserstein(self, score, score_pred):
+        return torch.mean(score*score_pred) #wasserstein 
+    
+    def kl_loss(self, z_logvar, z_mean, batch_size ):
+        kl_loss = -0.5 * (1 + z_logvar - z_mean.pow(2)- torch.exp(z_logvar) )
+        kl_loss = kl_loss.mean() * batch_size # kl_loss per datum in batch
+        return kl_loss
+        
+    def wasserstein_loss(self, y_true, y_pred):
+        return torch.mean(y_true * y_pred, dim=-1)
+
+    def content_loss(self, z_mean, z_logvar, constant_fields, net, mask, score):
+        score_pred_ = [ net.decoder( z_mean, z_logvar, constant_fields ) for ii in range(self.ensemble_size) ]
+        score_pred_ = torch.stack(score_pred_, axis=-1)  #  batch x W x H x 1 x ens
+        score_pred_ = score_pred_.squeeze(-2)  #  batch x W x H x ens
+        
+        score = torch.masked_select( score, (mask ) )
+        score_pred_ = torch.masked_select(score_pred_, (mask ) )
+        
+        content_loss  = self.content_loss_fct(score, score_pred_)
+        content_loss = content_loss.sum()/self.ensemble_size
+        return content_loss
+
+
+def denormalise(y_in):    
+    return torch.pow(10,y_in) - 1 
+
+def sample_crps(y_true, y_pred):
+    raise NotImplementedError
+
+    # mae = torch.abs((y_true.unsqueeze(0)- y_pred.unsqueeze(-1))).mean()
+    mae = torch.abs((y_true.unsqueeze(-1)- y_pred)).mean()
+    ensemble_size = y_pred.size(-1)
+    coef = -1/(2*ensemble_size * (ensemble_size - 1))
+    
+    # ens_var = coef * tf.reduce_mean(tf.reduce_sum(tf.abs(tf.expand_dims(y_pred, axis=0) - tf.expand_dims(y_pred, axis=1)),
+    
+    #                                               axis=(0, 1)))
+
+    ens_var =  coef * torch.abs(y_pred.unsqueeze(0)-y_pred.unsqueeze(1)).sum((0,1)).mean()
+    return mae + ens_var
+
+def sample_crps_phys(y_true, y_pred):
+    y_true = denormalise(y_true)
+    y_pred = denormalise(y_pred)
+    return sample_crps(y_true, y_pred)
+
+def ensmean_MSE(y_true, y_pred):
+    pred_mean = y_pred.mean(0)
+    y_true_squ = y_true.squeeze(-1)
+    return F.mse_loss(y_true_squ, pred_mean)
+
+def ensmean_MSE_phys(y_true, y_pred):
+    y_true = denormalise(y_true)
+    y_pred = denormalise(y_pred)
+    return ensmean_MSE(y_true, y_pred)
+
+def CL_chooser(CLtype):
+    return {"CRPS": sample_crps,
+            "CRPS_phys": sample_crps_phys,
+            "ensmeanMSE": ensmean_MSE,
+            "ensmeanMSE_phys": ensmean_MSE_phys}[CLtype]
