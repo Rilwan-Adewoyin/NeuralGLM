@@ -12,6 +12,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import math
 import copy
 import os
+from sklearn.preprocessing import FunctionTransformer
 from torch._six import string_classes
 import ujson
 import pickle
@@ -569,7 +570,6 @@ class Generator_mf(Generator):
                 _slice = slice( idx , idx  + adj_iter_chunk_size)
                 xr_gen_slice = xr_gn.isel(time=_slice)
                 next_marray = [ xr_gen_slice[name].to_masked_array(copy=True) for name in self.vars_for_feature  ]
-                #next_marray = [ xr_gn[name].isel(time=_slice).to_masked_array(copy=True) for name in self.vars_for_feature ]
                 
                 list_datamask = [(np.ma.getdata(_mar), np.ma.getmask(_mar)) for _mar in next_marray]
                 
@@ -1643,6 +1643,11 @@ class Era5EobsDataset(IterableDataset):
         return tensor
 # endregion
 
+def scale(x):
+    return np.log10(x+1)
+def inv_scale(x):
+    return  np.power(10,x)-1
+
 class Era5EobsTopoDataset_v2(Dataset):
     """
         This version extends Era5EobsDataset in the following ways:
@@ -1654,6 +1659,8 @@ class Era5EobsTopoDataset_v2(Dataset):
             - outputs Era5 rain
 
     """
+    latitude_array = np.linspace(58.95, 49.05, 100)
+    longitude_array = np.linspace(-10.95, 2.95, 140)
     
     def __init__(self, start_date, end_date,  
                     dconfig,
@@ -1691,7 +1698,9 @@ class Era5EobsTopoDataset_v2(Dataset):
         self.scaler_features=scaler_features
         self.scaler_target=scaler_target
         self.scaler_topo=scaler_topo
-                    
+        
+        self.target_norm_method = dconfig.target_norm_method
+        
         self.load_dataset_rain()
         self.load_dataset_mf()
         self.load_dataset_topo()
@@ -1706,7 +1715,7 @@ class Era5EobsTopoDataset_v2(Dataset):
         feature = torch.tensor(self.mf_data[idx*4 : idx*4+4])
         feature_mask = torch.tensor(self.mf_mask[idx*4 : idx*4+4])
         
-        feature = (feature-self.features_mean )/self.features_scale
+        feature = (feature-self.features_mean)/(self.features_scale)
         feature.masked_fill_( feature_mask, self.dconfig.mask_fill_value['model_field'])
         
         topo = torch.tensor(self.topo_data[None,... ])
@@ -1717,8 +1726,14 @@ class Era5EobsTopoDataset_v2(Dataset):
         target_mask = torch.tensor(self.rain_mask[idx:idx+1])
         target_windows = self.rain_date_windows[idx:idx+1]
         
-        target = target*self.target_scale
         target.masked_fill_(target_mask, self.dconfig.mask_fill_value['rain'] )
+        
+        if self.target_norm_method == 'log':
+            target = torch.log10(target+1)
+        elif self.target_norm_method == 'scale':
+            target = (target * self.scaler_target_scale) 
+        
+        
 
         # Score        
         dict_data = { 'fields':feature, 'rain':target, 'topo':topo,
@@ -1742,12 +1757,19 @@ class Era5EobsTopoDataset_v2(Dataset):
             self.rain_mask = mask
             self.rain_date_windows = date_windows
         
-        if getattr(self, 'scaler_target',False) is None:
-            self.scaler_target = MinMaxScaler(feature_range=(0,2))
-            self.scaler_target.fit( array[~mask].reshape(-1,1) )
-            # self.scaler_target.fit(  torch.masked_select(array, torch.logical_not(mask) )  )
-        self.target_scale = torch.as_tensor( self.scaler_target.scale_ )
-        
+        if self.target_norm_method == 'scale':
+            if getattr(self, 'scaler_target', None) is None:
+                self.scaler_target = MinMaxScaler(feature_range=(0.0, 6.0))
+                self.scaler_target.fit( array[~mask].reshape(-1,1) )
+            self.scaler_target_scale = torch.as_tensor( self.scaler_target.scale_[0] )
+            
+                    
+        if self.target_norm_method == 'log':
+            if getattr(self, 'scaler_target', None) is None:
+                self.scaler_target = FunctionTransformer(func= scale , inverse_func= inv_scale )
+                self.scaler_target.fit( array[~mask].reshape(-1,1) )
+            self.target_scale = lambda x: torch.log10(x+1)
+                
     def load_dataset_mf(self):
         slice_t = slice( self.start_idx_mf, self.end_idx_mf )
         slice_h = slice( None , None )
@@ -1756,7 +1778,7 @@ class Era5EobsTopoDataset_v2(Dataset):
         
         with xr.open_dataset( self.path_to_fields, decode_times=False, decode_cf=False ) as xr_gn:
             
-            marray = [ xr_gn[name].to_masked_array(copy=True) for name in self.vars_for_feature  ]
+            marray = [ xr_gn[name].isel(time=slice_t ,latitude=slice_h, longitude=slice_w).to_masked_array(copy=True) for name in self.vars_for_feature  ]
             list_datamask = [(np.ma.getdata(_mar), np.ma.getmask(_mar)) for _mar in marray]
             _data, _masks = list(zip(*list_datamask))
             
@@ -1766,7 +1788,7 @@ class Era5EobsTopoDataset_v2(Dataset):
             self.mf_data = stacked_data[ :, :, :, :]
             self.mf_mask = stacked_masks[ :, :, :, :]
 
-        if getattr(self, 'scaler_features', False) is None:
+        if getattr(self, 'scaler_features', None) is None:
             self.scaler_features = StandardScaler()
             self.scaler_features.fit(  self.mf_data.reshape(-1, len(self.vars_for_feature) )  )
         
@@ -1781,8 +1803,8 @@ class Era5EobsTopoDataset_v2(Dataset):
                                     
             self.topo_data = array[ 2:-2, 2:-2]
         
-        if getattr(self, 'scaler_topo', False) is None:
-            self.scaler_topo = MinMaxScaler(feature_range=(0,2))
+        if getattr(self, 'scaler_topo', None) is None:
+            self.scaler_topo = MinMaxScaler(feature_range=(0,0.2))
             self.scaler_topo.fit(self.topo_data.reshape(-1, 1))
             
         self.scaler_topo_scale_ = torch.as_tensor(self.scaler_topo.scale_)
@@ -1817,8 +1839,7 @@ class Era5EobsTopoDataset_v2(Dataset):
 
         ds_train = Era5EobsTopoDataset_v2( start_date = dconfig.train_start, 
                                     end_date=dconfig.train_end,
-                                    dconfig=dconfig,
-                                    # dconfig=dconfig,
+                                    dconfig=dconfig
                                     )
         
         ds_val = Era5EobsTopoDataset_v2( start_date=dconfig.val_start,
@@ -1884,6 +1905,7 @@ class Era5EobsTopoDataset_v2(Dataset):
         parser.add_argument("--test_end", type=str, default="2009")
         parser.add_argument("--gen_size", type=int, default=8, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
 
+        parser.add_argument("--target_norm_method", type=str, default='log', choices=['log','scale'])
         dconfig = parser.parse_known_args()[0]
         
         dconfig = Era5EobsTopoDataset_v2.add_fixed_args(dconfig)

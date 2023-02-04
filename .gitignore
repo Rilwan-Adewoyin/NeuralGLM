@@ -8,9 +8,11 @@ RelevantPapers/*
 .vscode/settings*
 *__pycache__
 .vscode*
+*vscode*
 
 # Large Data folders
 Checkpoints/*
+*Checkpoints/*
 Checkpoints_all/*
 Checkpoints_all_cities/*
 *zip

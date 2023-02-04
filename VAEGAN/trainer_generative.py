@@ -1,3 +1,9 @@
+
+import os, sys, inspect
+current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
+
 from dataloaders import Era5EobsTopoDataset_v2
 import numpy as np
 import torch
@@ -9,7 +15,6 @@ import os
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 import pickle
-from torchinfo import summary
 import argparse
 import yaml
 from torch.optim import Adam
@@ -22,6 +27,8 @@ import types
 import utils
 import einops
 import torchmetrics as tm
+import copy
+
 
 class GenerativeLightningModule(pl.LightningModule):
     
@@ -36,6 +43,8 @@ class GenerativeLightningModule(pl.LightningModule):
                 
         # Trainer
         self.dconfig = kwargs.get('dconfig', None)
+        self.batch_size = kwargs.get('batch_size',None)
+        self.sample_size = kwargs.get('sample_size',None)
         
         # Load Neural Model
 
@@ -43,92 +52,110 @@ class GenerativeLightningModule(pl.LightningModule):
         
         self.scaler_features = scaler_features
         self.scaler_target = scaler_target
-        self.register_buffer('target_scale', torch.as_tensor( scaler_target.scale_[0]) )
+        # self.register_buffer('target_scale', torch.as_tensor( scaler_target.scale_[0]) )
+        self.target_unscale = lambda x: torch.pow(10,x)-1
         
         self.debugging = debugging
         
-        self.loss_func = VAEGANLoss( content_loss=False, 
-                                content_loss_name='ensmeanMSE_phys',
+        self.vaegan_loss = VAEGANLoss( content_loss=False, 
+                                # content_loss_name='ensmeanMSE_phys',
                                 kl_weight=1e-5, 
+                                gp_weight=10,
                                 # cl_weight=0.2  
                                 )
+        self.mse = tm.MeanSquaredError(squared=True).to('cuda')        
+        self.mse_mean = tm.MeanMetric()
         
-        self.fid_loss = tm.image.fid.FrechetInceptionDistance( normalize=True )
-        # self.fid_loss.to(self.device)
-                   
-    def forward(self, variable_fields, constant_fields, image):
+    
+    def forward(self, variable_fields, constant_fields, mask  ):
+    
+        score_pred , image_output_scaled, z_mean, z_logvar = self.neural_net( variable_fields, constant_fields, mask  )
+        return score_pred , image_output_scaled, z_mean, z_logvar
         
-        score , image, z_mean, z_logvars = self.neural_net(variable_fields, constant_fields, image)
-        
-        return score , image, z_mean, z_logvars
-            
-    def step(self, batch:Dict, step_name, optimizer_idx=0):
-
+    def training_step(self, batch, batch_idx, optimizer_idx=None ):    
+    
         # Extracting data from batch
         variable_fields = batch['fields'].to(self.dtype)
         constant_fields = batch['topo'].to(self.dtype)
-        image_scaled = batch['rain'].to(self.dtype) # Images set to (c,h,w) == 0.0 correspond to inputs that arent real
-                                # False datums will have corresponding images of all 0
+        image_scaled = batch['rain'].to(self.dtype)
+            # Images set to (c,h,w) == 0.0 correspond to inputs that arent real
+            # False datums will have corresponding images of all 0
+        variable_fields = einops.rearrange( variable_fields, 'b h w c ->b c h w')
+        constant_fields = constant_fields[:, None]  
+        image_scaled = image_scaled[:,None]
+        
         mask = batch['mask']
         if mask.dtype is not torch.bool:
             mask = mask.to(torch.bool)
         mask = ~mask    
         
-        if optimizer_idx == 0:
-            # generator step
-            
-            # li_score_pred, li_image, li_zmean, li_zlogvars  = self.forward( variable_fields, constant_fields, image_scaled  )
-            score_pred , image_output_scaled, z_mean, z_logvar = self.forward( variable_fields, constant_fields, image_scaled  )
-            
-            # score_pred = torch.stack(li_score_pred, dim=-1)
-            # image = torch.stack(li_image, dim=-1)
-            # zmean = torch.stack(li_zmean, dim=-1)
-            # z_logvar = torch.stack(li_zlogvars, dim=-1)
-            
-            loss = self.loss_func( -torch.ones_like(score_pred), score_pred, z_mean, z_logvar, mask,
-                            self.neural_net, constant_fields  )
-            
-            # Prediction metrics for the generated images                            
-            output = {'img_pred_mse': F.mse_loss(
-                torch.masked_select(image_scaled, mask),
-                torch.masked_select(image_output_scaled.squeeze(1), mask) )}
+        output = {}
                     
-            output['loss'] = loss
-        
-        elif optimizer_idx == 1:
+        # if True: 
+        if optimizer_idx == 1:
+        # generator step
+
+            score_pred , image_output_scaled, z_mean, z_logvar = self.neural_net( variable_fields, constant_fields, mask  )
+            
+            fake_img_score = self.vaegan_loss.wasserstein( torch.ones_like(score_pred), score_pred )
+            
+            kl_loss = self.vaegan_loss.kl_loss(z_logvar, z_mean, score_pred.shape[0], mask)
+                                    
+            output['loss'] = -fake_img_score + kl_loss
+                                   
+            mse_loss = self.mse(
+                self.target_unscale( torch.masked_select(image_scaled.squeeze(1), mask) ),
+                    self.target_unscale( torch.masked_select(image_output_scaled.squeeze(1), mask) ) 
+                )
+
+            self.log("loss/gen", output['loss'], on_step=False, on_epoch=True, prog_bar=False)               
+            self.log("loss/kl", kl_loss, on_step=False, on_epoch=True, prog_bar=False)
+            self.log("loss/fake_img_score", fake_img_score, on_step=False, on_epoch=True, prog_bar=False)
+                                
+        elif optimizer_idx == 0:
             # Discrimintor step
+                    
+            with torch.no_grad():
+                vf = einops.rearrange( variable_fields, '(b t) d h w -> b (t d) h w', t=4)
+                vf = self.neural_net.grouped_conv2d_reduce_time( vf )
             
+            # Real images score
+            score_pred  = self.neural_net.discriminator( image_scaled, vf, constant_fields, mask  )
+            real_img_score = self.vaegan_loss.wasserstein( torch.ones_like(score_pred), score_pred)
+            
+            # Fake image score
+            score_pred_fake, image_output_scaled, z_mean, z_logvar = self.forward( variable_fields, constant_fields, mask  )
+            fake_img_score = self.vaegan_loss.wasserstein( torch.ones_like(score_pred), score_pred_fake) 
+            
+            # Gradient Penalty
+            gp_loss = self.vaegan_loss.gradient_penalty(
+                            self.neural_net.discriminator, 
+                            image_scaled, 
+                            image_output_scaled,
+                            disc_args =  (vf, constant_fields, mask))
+                        
+            loss_disc = -real_img_score + fake_img_score + gp_loss
+            self.log("loss/disc", loss_disc, on_step=False, on_epoch=True, prog_bar=False)
+            output = {'loss':loss_disc}
+            
+            self.log("loss/real_img_score", real_img_score, on_step=False, on_epoch=True, prog_bar=False)
+            self.log("loss/fake_img_score", fake_img_score, on_step=False, on_epoch=True, prog_bar=False)
+            self.log("loss/gp_loss", gp_loss, on_step=False, on_epoch=True, prog_bar=False)
+            self.log("loss", output['loss'])
+            
+            mse_loss = self.mse(
+                self.target_unscale( torch.masked_select(image_scaled.squeeze(1), mask) ),
+                    self.target_unscale( torch.masked_select(image_output_scaled.squeeze(1), mask) ) 
+                )
         
-            # Real images
-            _ = einops.rearrange( variable_fields, '(b t) h w d ->b (d t) h w', t=4)
-            _ = self.neural_net.grouped_conv2d_reduce_time(_)
+        self.log("loss/mse", mse_loss, on_step=False, on_epoch=True, prog_bar=True) 
             
-            score_pred  = self.neural_net.discriminator( image_scaled[:,None], _, constant_fields[:, None]  )
-            loss1 = self.loss_func( torch.ones_like(score_pred), score_pred, z_mean=None, z_logvar=None, mask=None)
-            
-            # Fake images
-            score_pred_fake , image_output_scaled, z_mean, z_logvar = self.forward( variable_fields, constant_fields, image_scaled  )
-            loss2 = self.loss_func(-torch.ones_like(score_pred), score_pred_fake, z_mean, z_logvar, mask) 
-            loss = loss1 + loss2
-            output = {'loss':loss}
         return output
 
-    def training_step(self, batch, batch_idx, optimizer_idx ) :
-        # training_step defines the train loop. It is independent of forward
-        output = self.step(batch, "train", optimizer_idx)
-        self.log("train_loss/loss",output['loss'])
-
-        if 'img_pred_mse' in output:
-            self.log("train/img_mse_rain", 
-                        output['img_pred_mse'],
-                        on_step=False, on_epoch=True )    
-    
-        return output
+   
     
     def validation_step(self, batch, batch_idx):
-        
-        # During validation we calculate the fid score on a set of generated images
-        
+                
         # Extracting data from batch
         variable_fields = batch['fields'].to(self.dtype)
         constant_fields = batch['topo'].to(self.dtype)
@@ -138,28 +165,32 @@ class GenerativeLightningModule(pl.LightningModule):
         if mask.dtype is not torch.bool:
             mask = mask.to(torch.bool)
         mask = ~mask    
+        
+        variable_fields = einops.rearrange( variable_fields, 'b h w c ->b c h w',)
+        constant_fields = constant_fields[:, None]
         
         image_output_scaled, *_= self.neural_net.generator( variable_fields, constant_fields )
         
-        # For FID loss input must be sclaed to 0-1 range
-        if self.fid_loss.device != image_output_scaled.device:
-            self.fid_loss.to(image_output_scaled.device)
-            
-        _ = ( image_scaled.shape[0], 3, *image_scaled.shape[1:] )
-        self.fid_loss.update(image_scaled[:,None].expand(_)/ self.scaler_target.feature_range[1], real=True )
-        self.fid_loss.update(image_output_scaled.expand(_) /self.scaler_target.feature_range[1], real=False)
+
         
-        # self.fid_loss.compute()
+        mse_score =  self.mse(
+                        self.target_unscale( torch.masked_select(image_scaled, mask)),
+                        self.target_unscale( torch.masked_select(image_output_scaled.squeeze(1), mask))
+                        )
+        
+        self.mse_mean.update(mse_score)
         
         return None
     
     def validation_epoch_end(self, validation_step_outputs):
         output = {}
         
-        fid_score = self.fid_loss.compute()
+        
+        mse_score = self.mse_mean.compute()
 
-        self.log("val_fid", fid_score, prog_bar=True, on_epoch=True)
-        self.fid_loss.reset()
+        self.log("val_mse", mse_score, prog_bar=True, on_epoch=True)
+        
+        self.mse_mean.reset()
         
     def test_step(self, batch, batch_idx) :
         output = {}
@@ -168,28 +199,38 @@ class GenerativeLightningModule(pl.LightningModule):
         
         variable_fields = batch['fields'].to(self.dtype)
         constant_fields = batch['topo'].to(self.dtype)
-        image_scaled = batch['rain'].to(self.dtype) # Images set to (c,h,w) == 0.0 correspond to inputs that arent real
-                                # False datums will have corresponding images of all 0
+        
+        image_scaled = batch['rain'].to(self.dtype) 
+                    # Images set to (c,h,w) == 0.0 correspond to inputs that arent real
+                    # False datums will have corresponding images of all 0
         mask = batch['mask']
+
+        variable_fields = einops.rearrange( variable_fields, 'b h w c ->b c h w')
+        constant_fields = constant_fields[:, None]  
+            
         if mask.dtype is not torch.bool:
             mask = mask.to(torch.bool)
-        mask = ~mask    
+        mask = ~mask        
         target_date_window = batch.pop('target_date_window', None)
         
         # generating image
-        image_output_scaled, *_= self.neural_net.generator( variable_fields, constant_fields )
-        
-        # Calc FID loss 
-        if self.fid_loss.device != image_output_scaled.device:
-            self.fid_loss.to(image_output_scaled.device)
-        _ = ( image_scaled.shape[0], 3, *image_scaled.shape[1:] )
-        self.fid_loss.update(image_scaled[:,None].expand(_)/self.scaler_target.feature_range[1], real=True )
-        self.fid_loss.update(image_output_scaled.expand(_)/self.scaler_target.feature_range[1], real=False)
-        
+        if self.sample_size is None:
+            image_output_scaled_mean, *_= self.neural_net.generator( variable_fields, constant_fields )
+        else:
+            li_image_output_scaled = [None]*self.sample_size
+            
+            for idx in range(self.sample_size):
+                i_o_s, *_ = self.neural_net.generator( variable_fields, constant_fields )
+                li_image_output_scaled[idx]=i_o_s
+            image_output_scaled_ensemble = torch.stack( li_image_output_scaled, -1 )
+            image_output_scaled_mean = image_output_scaled_ensemble.mean(-1)
+                           
         # Scaling up image
         output = {}
-        output['pred_rain'] = (image_output_scaled.squeeze().cpu().numpy() / self.scaler_target.scale_)
-        output['target_rain'] = (image_scaled.cpu().numpy() / self.scaler_target.scale_)
+        output['pred_rain_mean'] = (self.target_unscale( image_output_scaled_mean).squeeze().cpu().numpy() )
+        if self.sample_size is not None:
+            output['pred_rain_ensemble'] = (self.target_unscale( image_output_scaled_ensemble).squeeze().cpu().numpy() )
+        output['target_rain'] = (self.target_unscale(image_scaled).cpu().numpy() )
         output['mask'] = mask.cpu().numpy()
         output['target_date_window'] = target_date_window
         return output
@@ -198,14 +239,14 @@ class GenerativeLightningModule(pl.LightningModule):
         print("\nSaving Test Output to File")
 
         # Concatenating outputs of test steps
-        pred_rain = np.concatenate( [d['pred_rain'] for d in outputs] )
+        pred_rain_mean = np.concatenate( [d['pred_rain_mean'] for d in outputs] )
         target_rain = np.concatenate( [d['target_rain'] for d in outputs] )
         mask = np.concatenate([d['mask'] for d in outputs])
         target_date_window = np.concatenate( [d['target_date_window'] for d in outputs] )
 
         # sorting outputs based on dates
         sort_idx = np.argsort(target_date_window)
-        pred_rain = pred_rain[sort_idx]
+        pred_rain_mean = pred_rain_mean[sort_idx]
         target_rain = target_rain[sort_idx]
         mask = mask[sort_idx]
         target_date_window = target_date_window[sort_idx]
@@ -213,26 +254,30 @@ class GenerativeLightningModule(pl.LightningModule):
                 
         # Saving Model Outputs To file 
         output = {}
-        output['pred_rain'] = pred_rain
+        output['pred_rain_mean'] = pred_rain_mean
         output['target_rain'] = target_rain
         output['mask'] = mask
         output['target_date_window'] = target_date_window
         
-        
+        # Adding ensemble info to output dict
+        if self.sample_size is not None:
+            pred_rain_ensemble = np.concatenate( [d['pred_rain_ensemble'] for d in outputs] )
+            pred_rain_ensemble = pred_rain_ensemble[sort_idx]
+            output['pred_rain_ensemble']  = pred_rain_ensemble
+            
         suffix = f"{self.dconfig.test_start}_{self.dconfig.test_end}"
         file_path = os.path.join( self.logger.log_dir , f"test_output_{suffix}.pkl" ) 
         with open( file_path, "wb") as f:
             pickle.dump( output, f )
             
         # Logging Model Evaluation Metrics
-        fid_score = self.fid_loss.compute().cpu().numpy().item()
         
-        sqd_diff = (target_rain-pred_rain)**2
+        sqd_diff = (target_rain-pred_rain_mean)**2
         mse_score = sqd_diff[mask].mean()
-        r10_mse_score = sqd_diff[ np.logical_and(mask, target_rain>10.0 )  ].mean()
+        r10mse_score = sqd_diff[ np.logical_and(mask, target_rain>=10.0 )  ].mean()
                 
-        self.fid_loss.reset()
-        self.log("test_fid", fid_score, prog_bar=True, on_epoch=True)
+        self.log("test_mse", mse_score, prog_bar=True, on_epoch=True)
+        self.log("test_r10mse", r10mse_score, prog_bar=True, on_epoch=True)
         
         # Saving Model Evaluation Metrics
         # Recording losses on test set and summarised information about test run
@@ -244,37 +289,42 @@ class GenerativeLightningModule(pl.LightningModule):
             'test_start': self.dconfig.test_start,
             'test_end': self.dconfig.test_end,
             'test_mse': mse_score.item(),
-            'test_fid_score': fid_score,
-            'test_r10mse': r10_mse_score.item()}
+            
+            'test_r10mse': r10mse_score.item()}
 
         file_path_summary = os.path.join(self.logger.log_dir, f"summary_{suffix}.yaml")
         with open(file_path_summary, "w") as f:
             yaml.dump( summary, f)
         return super().test_epoch_end(outputs)
     
-    
     def configure_optimizers(self):
-        #debug
         
-        generator_params = (*self.neural_net.encoder.parameters(), *self.neural_net.decoder.parameters() )
         
-        optimizer_generator = Adam(  generator_params , lr=5e-6 )
-        frequency_generator = 5
+        generator_params = (*self.neural_net.encoder.parameters(), 
+                            *self.neural_net.grouped_conv2d_reduce_time.parameters(),
+                            *self.neural_net.decoder.parameters() )
+        
+        lr_scale = self.batch_size/32
+        
+        lr = (5e-6)*lr_scale
+                
+        optimizer_generator = Adam(  generator_params , lr=lr, betas=(0.5,0.9))
+        frequency_generator = 1 
+                
         dict_generator = {
-            'optimizer': optimizer_generator,
+            'optimizer': optimizer_generator,   
             'frequency': frequency_generator
         }
         
-        optimizer_discriminator = Adam(self.neural_net.discriminator.parameters() , lr=5e-6 )
-        frequency_discriminator = 1
+        discriminator_params = self.neural_net.discriminator.parameters()
+        optimizer_discriminator = Adam(discriminator_params , lr=lr, betas=(0.5,0.9) )
+        frequency_discriminator = 5
         dict_discriminator = {
             'optimizer': optimizer_discriminator,
             'frequency': frequency_discriminator,
         }
-        
-        # lr_scheduler = get_constant_schedule_with_warmup( optimizer, num_warmup_steps=1000, last_epoch=-1)
-        
-        return (dict_generator, dict_discriminator)
+                
+        return (dict_discriminator, dict_generator)
         
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         res = super().on_save_checkpoint(checkpoint)
@@ -348,11 +398,14 @@ class GenerativeLightningModule(pl.LightningModule):
         train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
         train_parser.add_argument("--exp_name", default='vaegan_benchmark', type=str )        
         train_parser.add_argument("--gpus", default=1, type=int)
-        # train_parser.add_argument("--sample_size", default=100)
+        
+        train_parser.add_argument("--sample_size", default=25)
+        
         train_parser.add_argument("--nn_name", default="VAEGAN", choices=["VAEGAN"])
         
         train_parser.add_argument("--max_epochs", default=300, type=int)
         train_parser.add_argument("--batch_size", default=48, type=int)
+        train_parser.add_argument("--batch_size_inf", default=128, type=int)
                 
         train_parser.add_argument("--debugging",action='store_true', default=False )
         train_parser.add_argument("--workers", default=6, type=int )
@@ -398,23 +451,21 @@ class GenerativeLightningModule(pl.LightningModule):
         # If val_check_interval is a float then it represents proportion of an epoc
         trainer = pl.Trainer(gpus=train_args.gpus,
                             default_root_dir = dir_model,
-                            callbacks =[EarlyStopping(monitor="val_fid", patience=25),
+                            callbacks =[EarlyStopping(monitor="val_mse", patience=1000),
                                             ModelCheckpoint(
-                                                monitor="val_fid",
-                                                filename='{epoch}-{step}-{val_fid:.3f}',
+                                                monitor="val_mse",
+                                                filename='{epoch}-{step}-{val_mse:.3f}',
                                                 save_last=False,
                                                 auto_insert_metric_name=True,
                                                 save_top_k=1)],
                             enable_checkpointing=True,
                             precision=32,
                             max_epochs=train_args.max_epochs,
-                            num_sanity_val_steps=0,
-                            gradient_clip_val=1.5,
-                            
+                            num_sanity_val_steps=0,                            
                             limit_train_batches=51 if train_args.debugging else None,
-                            limit_val_batches=5 if train_args.debugging else None,
-                            limit_test_batches=5 if train_args.debugging else None,
-                            val_check_interval=None if train_args.debugging else train_args.val_check_interval
+                            limit_val_batches=51 if train_args.debugging else None,
+                            limit_test_batches=51 if train_args.debugging else None,
+                            val_check_interval= train_args.val_check_interval
                             )
         # Load GLM Model
         neural_net = VAEGAN(**vars(model_args) )
@@ -430,17 +481,17 @@ class GenerativeLightningModule(pl.LightningModule):
                                 shuffle=True,
                                 pin_memory=True,
                                 collate_fn=Era5EobsTopoDataset_v2.collate_fn, 
-                                persistent_workers=False)
+                                persistent_workers=True)
 
-        dl_val = DataLoader(ds_val, train_args.batch_size, 
+        dl_val = DataLoader(ds_val, train_args.batch_size_inf, 
                                 num_workers=train_args.workers,
-                                drop_last=True, 
+                                drop_last=False, 
                                 collate_fn=Era5EobsTopoDataset_v2.collate_fn,
                                 pin_memory=True,
-                                persistent_workers=False)
+                                persistent_workers=True)
 
-        dl_test = DataLoader(ds_test, train_args.batch_size, 
-                                drop_last=True,
+        dl_test = DataLoader(ds_test, train_args.batch_size_inf, 
+                                drop_last=False,
                                 collate_fn=Era5EobsTopoDataset_v2.collate_fn,
                                 pin_memory=True,
                                 persistent_workers=False )
@@ -450,7 +501,9 @@ class GenerativeLightningModule(pl.LightningModule):
         glm = GenerativeLightningModule(scaler_features,scaler_target,
                                         neural_net,
                                         train_args.debugging,
-                                        dconfig = data_args)
+                                        dconfig = data_args,
+                                        sample_size = train_args.sample_size,
+                                        batch_size = train_args.batch_size)
 
         # Patching ModelCheckpoint checkpoint name creation
         mc = next( filter( lambda cb: isinstance(cb, ModelCheckpoint), trainer.callbacks) )
@@ -465,7 +518,7 @@ class GenerativeLightningModule(pl.LightningModule):
         # Fit the Trainer
         trainer.fit(  glm, 
                         train_dataloaders=dl_train,
-                        val_dataloaders=dl_val)
+                        val_dataloaders=dl_val if not train_args.debugging else copy.deepcopy(dl_train))
         
         # Test the Trainer
         trainer.test(dataloaders=dl_test, ckpt_path='best')
@@ -516,7 +569,7 @@ class GenerativeLightningModule(pl.LightningModule):
             dataloaders=dl_test)
 
 if __name__ == '__main__':
-    from vaegan import VAEGAN
+    from VAEGAN.vaegan import VAEGAN
     
     parent_parser = ArgumentParser(add_help=False, allow_abbrev=False)
     

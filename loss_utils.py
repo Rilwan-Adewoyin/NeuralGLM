@@ -595,64 +595,54 @@ class VAEGANLoss():
     
     def __init__( self,
         content_loss = True,
-        content_loss_name = None,#'ensmeanMSE_phys' #TODO: check which one is used ,
+        content_loss_name = None, #'ensmeanMSE_phys' #TODO: check which one is used ,
         enemble_size = None,
         kl_weight= None, #TODO: find the kl weight
-        cl_weight= None #TODO,
-        
+        cl_weight= None,  #TODO: 
+        gp_weight=None
         ):
         
         self.use_content_loss = content_loss
         self.enemble_size = enemble_size
         self.kl_weight = kl_weight
         self.cl_weight = cl_weight
+        self.gp_weight = gp_weight
         
         self.content_loss_name = content_loss_name
-        self.content_loss_fct = CL_chooser(self.content_loss_name)
+        self.content_loss_fct = None if self.content_loss_name is None else CL_chooser(self.content_loss_name)
          
     def __call__(self, score, score_pred, z_mean=None, z_logvar=None, mask=None,
                  net=None, constant_field=None ):
         
-        b, *_ = score.shape
-
-        # applying mask for loss and evaluation metrics
-        # score_pred_masked      = torch.masked_select(score_pred, (mask ) )
-        # score_masked   = torch.masked_select(score, (mask ) )
-        # z_mean_masked   = torch.masked_select(z_mean, (mask ) )
-        # z_logvar_masked   = torch.masked_select(z_logvar, (mask ) )
-        
-        # vaegen_loss = torch.mean(score_masked*score_pred_masked, dim=-1) #wasserstein 
-        
-        vaegen_loss = self.wasserstein(score, score_pred)
-        total_loss = vaegen_loss
-        # kl_loss = -0.5 * (1 + z_logvar_masked - z_mean_masked.pow(2)- torch.exp(z_logvar_masked) )
-        # kl_loss = kl_loss.mean() * batch_size # kl_loss per datum in batch
-        
-        if z_logvar is not None:
-            kl_loss = self.kl_loss(z_logvar, z_mean, b)
-            
-            total_loss += kl_loss*self.kl_weight
-        
-        if self.use_content_loss == True:
-            content_loss = self.content_loss( z_mean, z_logvar, constant_field, net, mask)
-            
-            # score_pred_ = [ net.decoder( z_mean, z_logvar, constant_field ) for ii in range(self.ensemble_size) ]
-            # score_pred_ = torch.stack(score_pred_, axis=-1)  #  batch x W x H x 1 x ens
-            # score_pred_ = score_pred_.squeeze(-2)  #  batch x W x H x ens
-            
-            # content_loss  = self.content_loss_fct(score, score_pred_)
-            
-            total_loss += self.cl_weight*content_loss
-        
-        return total_loss
+        raise NotImplementedError
+        return None
     
     def wasserstein(self, score, score_pred):
         return torch.mean(score*score_pred) #wasserstein 
     
-    def kl_loss(self, z_logvar, z_mean, batch_size ):
-        kl_loss = -0.5 * (1 + z_logvar - z_mean.pow(2)- torch.exp(z_logvar) )
-        kl_loss = kl_loss.mean() * batch_size # kl_loss per datum in batch
-        return kl_loss
+    def kl_loss(self, z_logvar, z_mean, batch_size, mask=None ):
+                
+        if mask is None:
+            kl_loss = 0.5 * (-1 - z_logvar + z_mean.pow(2) + torch.exp(z_logvar) )
+            kl_loss = torch.reshape(kl_loss, [batch_size, -1])
+            kl_loss = kl_loss.sum(1).mean()
+            
+        else:
+            #Pooling needs to be aware of the mask
+            #Mask areas should be ignored from kl average
+            mask_pooled = torch.nn.functional.avg_pool2d(mask.to(torch.float), (5,7), stride=(5,7), count_include_pad=False  )            
+            mask_pooled = mask_pooled[:,None]
+            mask_pooled = torch.where( mask_pooled>=0.5, torch.ones_like(z_mean), torch.zeros_like(z_mean) )
+            masked_elems_per_batch = mask_pooled.sum(dim=(-3, -2, -1))
+            
+            kl_loss = 0.5 * (-1 - z_logvar + z_mean.pow(2) + torch.exp(z_logvar) )
+            kl_loss = kl_loss*mask_pooled      
+            
+            
+            kl_loss = kl_loss.sum((-3,-2,-1)) / masked_elems_per_batch
+            kl_loss = kl_loss.mean()
+        
+        return self.kl_weight*kl_loss
         
     def wasserstein_loss(self, y_true, y_pred):
         return torch.mean(y_true * y_pred, dim=-1)
@@ -668,6 +658,48 @@ class VAEGANLoss():
         content_loss  = self.content_loss_fct(score, score_pred_)
         content_loss = content_loss.sum()/self.ensemble_size
         return content_loss
+
+    def gradient_penalty(self, discriminator, real_image, fake_image, disc_args, scaler=None):
+        b, *_ = real_image.shape
+        device = real_image.device
+        
+        alpha = torch.rand(b, 1, 1, 1).to(real_image.device)
+        alpha = alpha.expand_as(real_image)
+
+
+        interpolated = alpha*real_image + (1-alpha)*fake_image
+        interpolated.requires_grad = True
+
+        # Calculate probability of interpolated examples
+        prob_interpolated = discriminator(interpolated, *disc_args)
+        
+         # Calculate gradients of probabilities with respect to examples
+        gradients = torch.autograd.grad(outputs=prob_interpolated, inputs=interpolated,
+                               grad_outputs=torch.ones(prob_interpolated.size()).to(device),
+                               create_graph=True, retain_graph=True)[0]
+        
+                # Gradients have shape (batch_size, num_channels, img_width, img_height),
+        
+        gradients = gradients/scaler.get_scale() if scaler is not None else gradients
+        
+        # so flatten to easily take norm per example in batch
+        gradients = gradients.view(b, -1)
+               
+        
+        # Derivatives of the gradient close to 0 can cause problems because of
+        # the square root, so manually calculate norm and add epsilon
+        # gradients_norm = torch.sqrt(torch.sum(gradients ** 2, dim=1) + 1e-12)
+        
+        gradients_norm = torch.sqrt(torch.sum(gradients ** 2, dim=1))
+        
+        gradients_norm = ((gradients_norm-1)**2).mean()
+        
+        # Return gradient penalty
+        return self.gp_weight * gradients_norm
+        
+        
+        
+
 
 
 def denormalise(y_in):    
