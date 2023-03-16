@@ -83,8 +83,8 @@ def gamma_ll(target_vals, v, mask):
     v = v[torch.argwhere(mask).squeeze()] 
     
     # # Deal with cases where data is missing for a station
-    # v = v[~torch.isnan(target_vals), :]
-    # target_vals = target_vals[~torch.isnan(target_vals)]
+    v = v[~torch.isnan(target_vals), :]
+    target_vals = target_vals[~torch.isnan(target_vals)]
 
     # Make r mask
     r, target_vals = make_r_mask(target_vals)
@@ -109,22 +109,29 @@ class GammaBiasConvCNPElev(nn.Module):
                  ls = 0.1,
                  
                  dec_n_blocks = 6,
-                 dec_n_channels = 128,
+                 mlp_hidden_channels = 96, # 64,
+                 
+                 dec_n_channels = 160 # #128,
                  ):
         super().__init__()
         self.in_channels = in_channels
         self.activation = torch.relu
         self.sigmoid = nn.Sigmoid()
 
-        self.encoder = Encoder(in_channels = in_channels)
-        self.mlp = MLP(in_channels = 128,
-            out_channels = 3,
-            hidden_channels = 64,
-            hidden_layers = 4)
+        self.encoder = Encoder(in_channels = in_channels, 
+                                out_channels = dec_n_channels)
+
         self.decoder = CNN( n_blocks=dec_n_blocks, 
                            n_channels=dec_n_channels,
                            Conv=torch.nn.Conv2d,
                            )
+                
+        self.mlp = MLP(in_channels = dec_n_channels,
+            out_channels = 3,
+            hidden_channels = mlp_hidden_channels,
+            hidden_layers = 4)
+        
+
         self.out_layer = GammaFinalLayer(
             init_ls = ls,
             n_params = 3
@@ -132,7 +139,7 @@ class GammaBiasConvCNPElev(nn.Module):
 
         self.elev_mlp = MLP(4,
             out_channels = 3,
-            hidden_channels = 64,
+            hidden_channels = mlp_hidden_channels,
             hidden_layers = 4)
 
     def forward(self, h, mask, dists, elev):
@@ -182,7 +189,7 @@ class Encoder(nn.Module):
         Total number of context variables 
     """
 
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, out_channels):
         super().__init__()
         self.in_channels = in_channels
         Conv=lambda in_channels: self._make_abs_conv(nn.Conv2d)(
@@ -196,7 +203,7 @@ class Encoder(nn.Module):
         self.conv = Conv(in_channels)
 
         self.transform_to_cnn = nn.Linear(
-            self.in_channels*2, 128
+            self.in_channels*2, out_channels
         )
 
         self.density_to_confidence = ProbabilityConverter(
@@ -209,9 +216,7 @@ class Encoder(nn.Module):
             def forward(self, input):
                 return F.conv2d(
                     input,
-                    
                     self.weight.abs(),
-                    self.weight,
                     self.bias,
                     self.stride,
                     self.padding,
@@ -238,6 +243,72 @@ class Encoder(nn.Module):
         h = self.transform_to_cnn(h.permute(0, 2, 3, 1))
 
         return h
+
+
+         
+class ProbabilityConverter(nn.Module):
+    """
+    Convert from densities to probabilities
+    From https://github.com/YannDubs
+    """
+
+    def __init__(
+        self,
+        trainable_dim=1,):
+
+        super().__init__()
+        self.min_p = 0.0
+        self.trainable_dim = trainable_dim
+        self.initial_temperature = 1.0
+        self.initial_probability = 0.5
+        self.initial_x = 0.0
+        self.temperature_transformer = F.softplus
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.temperature = torch.tensor([self.initial_temperature] * self.trainable_dim)
+        self.temperature = nn.Parameter(self.temperature)
+
+        initial_bias = self._probability_to_bias(
+            self.initial_probability, initial_x=self.initial_x
+        )
+
+        self.bias = torch.tensor([initial_bias] * self.trainable_dim)
+        self.bias = nn.Parameter(self.bias)
+
+    def _probability_to_bias(self, p, initial_x=0):
+        """
+        Compute the bias to use to satisfy the constraints.
+        """
+        assert p > self.min_p and p < 1 - self.min_p
+        range_p = 1 - self.min_p * 2
+        p = (p - self.min_p) / range_p
+        p = torch.tensor(p, dtype=torch.float)
+
+        bias = -(torch.log((1 - p) / p) / self.initial_temperature + initial_x)
+        return bias
+
+    def _rescale_range(self, p, init_range, final_range):
+        """
+        Rescale vec to be in new range
+        """
+        init_min, final_min = init_range[0], final_range[0]
+        init_delta = init_range[1] - init_range[0]
+        final_delta = final_range[1] - final_range[0]
+
+        return (((p - init_min)*final_delta) / init_delta) + final_min
+
+    def forward(self, x):
+        self.temperature.to(x.device)
+        self.bias.to(x.device)
+
+        temperature = self.temperature_transformer(self.temperature)
+        full_p = torch.sigmoid((x + self.bias) * temperature)
+        p = self._rescale_range(full_p, (0, 1), (self.min_p, 1 - self.min_p))
+
+        return p
+
 
 class MLP(nn.Module):
     """
@@ -442,12 +513,6 @@ class GammaFinalLayer(nn.Module):
         beta2 = torch.clamp(beta1, min = 1e-5, max=1e5)
         
 
-        # # NOTE: debug
-        # alpha2 = torch.clamp(alpha1, min = 1e-2, max=1e2)
-        # beta2 = torch.clamp(beta1, min = 1e-2, max=1e2)
-        # rho = torch.clamp(rho, min=1e-5, max=1-1e-5)
-        # alpha2 = torch.clamp(alpha, min=1e-2, max=1e2)
-        # beta2 = torch.clamp(beta, min=1e-1, max=1e2)
         return rho, alpha2, beta2
 
     def _force_positive(self, x):
@@ -483,9 +548,8 @@ class ParamLayer(nn.Module):
         # Calculate rbf kernel
         kernel = torch.exp(-0.5 * dists / self.init_ls ** 2)
         
-        # NOTE: Added normalization to deal
-        #   with instabiilty by ensuring that kernel has weights with norm 1 or sqrt 2
-        kernel = torch.nn.functional.normalize(kernel, p=1.0, dim=[1,2])
+        #NOTE:
+        # kernel = torch.nn.functional.normalize(kernel, p=1.0, dim=[1,2])
         
         vals = torch.einsum('bij,pij->bpij', wt, kernel)
         outp = torch.sum(vals, (2, 3))
@@ -493,71 +557,6 @@ class ParamLayer(nn.Module):
         return outp
    
    
-   
-         
-class ProbabilityConverter(nn.Module):
-    """
-    Convert from densities to probabilities
-    From https://github.com/YannDubs
-    """
-
-    def __init__(
-        self,
-        trainable_dim=1,):
-
-        super().__init__()
-        self.min_p = 0.0
-        self.trainable_dim = trainable_dim
-        self.initial_temperature = 1.0
-        self.initial_probability = 0.5
-        self.initial_x = 0.0
-        self.temperature_transformer = F.softplus
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        self.temperature = torch.tensor([self.initial_temperature] * self.trainable_dim)
-        self.temperature = nn.Parameter(self.temperature)
-
-        initial_bias = self._probability_to_bias(
-            self.initial_probability, initial_x=self.initial_x
-        )
-
-        self.bias = torch.tensor([initial_bias] * self.trainable_dim)
-        self.bias = nn.Parameter(self.bias)
-
-    def _probability_to_bias(self, p, initial_x=0):
-        """
-        Compute the bias to use to satisfy the constraints.
-        """
-        assert p > self.min_p and p < 1 - self.min_p
-        range_p = 1 - self.min_p * 2
-        p = (p - self.min_p) / range_p
-        p = torch.tensor(p, dtype=torch.float)
-
-        bias = -(torch.log((1 - p) / p) / self.initial_temperature + initial_x)
-        return bias
-
-    def _rescale_range(self, p, init_range, final_range):
-        """
-        Rescale vec to be in new range
-        """
-        init_min, final_min = init_range[0], final_range[0]
-        init_delta = init_range[1] - init_range[0]
-        final_delta = final_range[1] - final_range[0]
-
-        return (((p - init_min)*final_delta) / init_delta) + final_min
-
-    def forward(self, x):
-        self.temperature.to(x.device)
-        self.bias.to(x.device)
-
-        temperature = self.temperature_transformer(self.temperature)
-        full_p = torch.sigmoid((x + self.bias) * temperature)
-        p = self._rescale_range(full_p, (0, 1), (self.min_p, 1 - self.min_p))
-
-        return p
-
 class InterpolatedLocationsDistance():
     """
         This class can be used to retreive the (h, w) shaped matrices reflecting the

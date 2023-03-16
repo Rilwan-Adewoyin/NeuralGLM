@@ -1731,7 +1731,8 @@ class Era5EobsTopoDataset_v2(Dataset):
         if self.target_norm_method == 'log':
             target = torch.log10(target+1)
         elif self.target_norm_method == 'scale':
-            target = (target * self.scaler_target_scale) 
+            # target = (target * self.scaler_target_scale)
+            pass
         
         
 
@@ -1759,7 +1760,7 @@ class Era5EobsTopoDataset_v2(Dataset):
         
         if self.target_norm_method == 'scale':
             if getattr(self, 'scaler_target', None) is None:
-                self.scaler_target = MinMaxScaler(feature_range=(0.0, 6.0))
+                self.scaler_target = MinMaxScaler(feature_range=(0.0, 90.0))
                 self.scaler_target.fit( array[~mask].reshape(-1,1) )
             self.scaler_target_scale = torch.as_tensor( self.scaler_target.scale_[0] )
             

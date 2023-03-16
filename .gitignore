@@ -12,7 +12,8 @@ RelevantPapers/*
 
 # Large Data folders
 Checkpoints/*
-*Checkpoints/*
+CONVCNP/Checkpoints/*
+VAEGAN/Checkpoints/*
 Checkpoints_all/*
 Checkpoints_all_cities/*
 *zip
