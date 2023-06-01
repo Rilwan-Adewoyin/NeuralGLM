@@ -358,11 +358,10 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
     def nll_positive(self, obs, mu, disp, p, **kwargs  ):
         #L>0
-        # using approximation from https://www.hindawi.com/journals/jps/2018/1012647/
         
         #
         lambda_ = l = mu.pow(2-p) / ( disp * (2-p) )
-        alpha = a = (2-p) / (p-1)  #from the gamm distribution
+        alpha = a = (2-p) / (p-1)  #from the gamma distribution
         beta = b = disp*(p-1)*mu.pow(p-1)
         L = obs
         theta = disp
@@ -387,7 +386,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
                     *((2*j+1/3)*pi).pow(-0.5) * (j/e).pow(-j) \
                     *((2*j*a+1/3)*pi).pow(-0.5) * ((j*a)/e).pow(-j*a) 
         
-            # summing from 1 to 48
+            # summing from 1 to J
             B = Wj.sum(dim=0)
             B = torch.log(B)
             
@@ -400,7 +399,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
             logW = (j*a)*torch.log(L) + (-a*j)*torch.log(p-1) + (-j*(1+a))*torch.log(theta) + -j*torch.log(2-p) + -torch.lgamma(j+1) + -torch.lgamma(j*a)
             
-            #summing from 1 to 48
+            #summing from 1 to J
             B = logW.sum(dim=0)
 
             ll = A + B + C
@@ -430,7 +429,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             
             ll = A + B + C
             
-        #------------- Version 5 - Use a window around J*  and jensens inequality to conver log(sum(Wj)) to sum(log(Wj))
+        #------------- Version 5 - Use a window around J*  and jensens inequality to convert log(sum(Wj)) to sum(log(Wj))
         elif self.cp_version == 5:
             
             A = torch.log(L.pow(-1))
