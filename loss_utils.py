@@ -336,16 +336,9 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         self.register_buffer('e',torch.tensor(math.e) )
         self.tblogger = kwargs.get('tblogger',None)
         
-        self.cp_version = kwargs.get('cp_version',2)
-
-        if self.cp_version in [2,3]:
-            self.max_j = kwargs.get('max_j', 12)
-            self.register_buffer('j', torch.arange(1, self.max_j+1, 1, dtype=torch.float, requires_grad=False).unsqueeze(-1) )
-
-        elif self.cp_version in [4,5]:
-            self.j_window_size = kwargs.get('j_window_size', 5)
-            self.register_buffer('j_window_size_float', torch.as_tensor( kwargs.get('j_window_size', 5.0), dtype=torch.float) )
-            self.register_buffer('j_window', torch.arange(start=-self.j_window_size+1, end=self.j_window_size, step=1, dtype=torch.float, requires_grad=False) )
+        self.j_window_size = kwargs.get('j_window_size', 24)
+        self.register_buffer('j_window_size_float', torch.as_tensor( kwargs.get('j_window_size', 24.0), dtype=torch.float) )
+        self.register_buffer('j_window', torch.arange(start=-self.j_window_size+1, end=self.j_window_size, step=1, dtype=torch.float, requires_grad=False) )
         
         # Check validity of reduction mode
         if self.reduction not in  ['none','mean','sum']:
@@ -371,102 +364,29 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         C = L*mu.pow(1-p)*(1-p).pow(-1) - mu.pow(2-p)*(2-p).pow(-1)
         C *=  theta.pow(-1)
 
-        #------------- Version 2 - using 0<j<=12 (ADE)
-        if self.cp_version == 2:
-            j = self.j
-                       
 
-            A = torch.log(L.pow(-1))
-            #  stirling approx of GammaFunc is inaccurate for GammaFunc<1; the approx goes negative while the true value is positive
-            # This leads to an error later on when we use log transform.
-                    
-            #Therefore we used the improved GammaFunc approximation proposed by Gosper
-                # This approximates x! better for x between 0 and 1
-            Wj = L.pow(j*a) * (p-1).pow(-a*j) * theta.pow(-j*(1+a)) * (2-p).pow(-j) \
-                    *((2*j+1/3)*pi).pow(-0.5) * (j/e).pow(-j) \
-                    *((2*j*a+1/3)*pi).pow(-0.5) * ((j*a)/e).pow(-j*a) 
+
+        with torch.no_grad():
+            #  jmax is currently calculated using the Stirling formulation. instead use
+            #  the onas method to create an estimation for the value of jmax then in 
+            #  paper state that this approximation holds significantly beeter for low x
+            jmax = L.pow(2-p) * (2-p).pow(-1) * theta.pow(-1)
+            jmax = torch.round(jmax)
+            jmax = torch.where(jmax<self.j_window_size, self.j_window_size_float , jmax )
+            jmax = jmax[:, None].expand( jmax.numel(), (self.j_window_size*2) - 1) #expanding
+            j = (jmax + self.j_window).transpose(0,1) # This is a range of j for each index
+
+        A = torch.log(L.pow(-1))
+
+        #Therefore we used the improved GammaFunc approximation proposed by Gosper
+        Wj = L.pow(j*a) * (p-1).pow(j*-a) * theta.pow(-j*(1+a)) * (2-p).pow(-j) \
+                *((2*j+1/3)*pi).pow(-0.5) * (j/e).pow(-j) \
+                *((2*j*a+1/3)*pi).pow(-0.5) * ((j*a)/e).pow(-j*a) 
         
-            # summing from 1 to J
-            B = Wj.sum(dim=0)
-            B = torch.log(B)
-            
-            ll = A + B + C
-
-        #------------- Version 3 (ADE)- using 0<j<=J and jensens inequality to convert log(sum(Wj)) to sum(log(Wj))
-        elif self.cp_version == 3:
-            j=self.j
-            A = torch.log(L.pow(-1))
-
-            logW = (j*a)*torch.log(L) + (-a*j)*torch.log(p-1) + (-j*(1+a))*torch.log(theta) + -j*torch.log(2-p) + -torch.lgamma(j+1) + -torch.lgamma(j*a)
-            
-            #summing from 1 to J
-            B = logW.sum(dim=0)
-
-            ll = A + B + C
-            
-        #------------- Version 4 - Use a window around J* and stirling approximation (acc use Goson approx) (ADE)
-        elif self.cp_version == 4:
-
-            with torch.no_grad():
-                #  jmax is currently calculated using the Stirling formulation. instead use
-                #  the onas method to create an estimation for the value of jmax then in 
-                #  paper state that this approximation holds significantly beeter for low x
-                jmax = L.pow(2-p) * (2-p).pow(-1) * theta.pow(-1)
-                jmax = torch.round(jmax)
-                jmax = torch.where(jmax<self.j_window_size, self.j_window_size_float , jmax )
-                jmax = jmax[:, None].expand( jmax.numel(), (self.j_window_size*2) - 1) #expanding
-                j = (jmax + self.j_window).transpose(0,1) # This is a range of j for each index
-
-            A = torch.log(L.pow(-1))
-
-            #Therefore we used the improved GammaFunc approximation proposed by Gosper
-            Wj = L.pow(j*a) * (p-1).pow(j*-a) * theta.pow(-j*(1+a)) * (2-p).pow(-j) \
-                    *((2*j+1/3)*pi).pow(-0.5) * (j/e).pow(-j) \
-                    *((2*j*a+1/3)*pi).pow(-0.5) * ((j*a)/e).pow(-j*a) 
-            
-            B = Wj.sum(dim=0)
-            B = torch.log(B)
-            
-            ll = A + B + C
-            
-        #------------- Version 5 - Use a window around J*  and jensens inequality to convert log(sum(Wj)) to sum(log(Wj))
-        elif self.cp_version == 5:
-            
-            A = torch.log(L.pow(-1))
-
-            with torch.no_grad():
-                jmax = L.pow(2-p) * (2-p).pow(-1) * theta.pow(-1)
-                jmax = torch.round(jmax)
-                jmax = torch.where(jmax<self.j_window_size, self.j_window_size_float , jmax )
-                jmax = jmax[:, None].expand( jmax.numel(), (self.j_window_size*2) - 1) #expanding
-                j = (jmax + self.j_window).transpose(0,1) # This is a range of j for each index
-
-            if False and self.tblogger and self.training:
-                _1 = (j*a)*torch.log(L)
-                _2 = (j*-a)*torch.log(p-1)
-                _3 = (-j*(1+a))*torch.log(theta)
-                _4 = -j*torch.log(2-p)
-                _5 = -torch.lgamma(j+1)
-                _6 = -torch.lgamma(j*a)
-                logW = _1 + _2 + _3 + _4 + _5 + _6
-
-                self.tblogger.add_scalars(
-                    'B_loss',{
-                        '1':_1.detach().mean(),
-                        '2':_2.detach().mean(),
-                        '3':_3.detach().mean(),
-                        '4':_4.detach().mean(),
-                        '5':_5.detach().mean(),
-                        '6':_6.detach().mean()
-                        },
-                    global_step = kwargs.get('global_step') )
-            else:
-                logW = (j*a)*torch.log(L) + (j*-a)*torch.log(p-1) + (-j*(1+a))*torch.log(theta) + -j*torch.log(2-p) +\
-                    -torch.lgamma(j+1) + -torch.lgamma(j*a)            #summing over j
-            
-            B = logW.sum(dim=0)
-
-            ll = A + B + C
+        B = Wj.sum(dim=0)
+        B = torch.log(B)
+        
+        ll = A + B + C
 
         return -ll 
 
