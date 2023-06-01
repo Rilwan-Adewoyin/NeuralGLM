@@ -1,7 +1,30 @@
+# Presentation Folders
 Data
 Presentations
 RelevantPapers/*
 
+
+# Python / IDE files
+.vscode/settings*
 *__pycache__
-.vscode/*
+.vscode*
+*vscode*
+
+# Large Data folders
 Checkpoints/*
+CONVCNP/Checkpoints/*
+VAEGAN/Checkpoints/*
+Checkpoints_all/*
+Checkpoints_all_cities/*
+*zip
+
+
+#Shell scripts
+experiment_scripts/*
+*.sh
+
+# Jupyter
+*.ipynb*
+
+# Other
+trainer_convCNPClimate.py
