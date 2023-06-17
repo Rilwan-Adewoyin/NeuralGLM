@@ -1,3 +1,10 @@
+# Config files
+*.cfg
+*.ini
+*.conf
+*.json
+
+
 # Presentation Folders
 Data
 Presentations
