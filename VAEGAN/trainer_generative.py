@@ -1,9 +1,6 @@
 
-import os, sys, inspect
-current_dir = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
-
+import os, sys
+sys.path.append(os.getcwd())
 from dataloaders import Era5EobsTopoDataset_v2
 import numpy as np
 import torch
@@ -66,6 +63,8 @@ class GenerativeLightningModule(pl.LightningModule):
         self.mse = tm.MeanSquaredError(squared=True).to('cuda')        
         self.mse_mean = tm.MeanMetric()
         
+        self.log_dir = kwargs.get('log_dir',None)
+            
     
     def forward(self, variable_fields, constant_fields, mask  ):
     
@@ -260,13 +259,15 @@ class GenerativeLightningModule(pl.LightningModule):
         output['target_date_window'] = target_date_window
         
         # Adding ensemble info to output dict
+        log_dir = self.log_dir if self.log_dir else self.logger.log_dir
+        
         if self.sample_size is not None:
             pred_rain_ensemble = np.concatenate( [d['pred_rain_ensemble'] for d in outputs] )
             pred_rain_ensemble = pred_rain_ensemble[sort_idx]
             output['pred_rain_ensemble']  = pred_rain_ensemble
             
         suffix = f"{self.dconfig.test_start}_{self.dconfig.test_end}"
-        file_path = os.path.join( self.logger.log_dir , f"test_output_{suffix}.pkl" ) 
+        file_path = os.path.join( log_dir , f"test_output_{suffix}.pkl" ) 
         with open( file_path, "wb") as f:
             pickle.dump( output, f )
             
@@ -292,7 +293,7 @@ class GenerativeLightningModule(pl.LightningModule):
             
             'test_r10mse': r10mse_score.item()}
 
-        file_path_summary = os.path.join(self.logger.log_dir, f"summary_{suffix}.yaml")
+        file_path_summary = os.path.join(log_dir, f"summary_{suffix}.yaml")
         with open(file_path_summary, "w") as f:
             yaml.dump( summary, f)
         return super().test_epoch_end(outputs)
@@ -343,9 +344,9 @@ class GenerativeLightningModule(pl.LightningModule):
         path_config_data = os.path.join(dir_path, "config_data.yaml")
         path_config_model = os.path.join(dir_path, "config_model.yaml")
         
-        config_train = yaml.safe_load(open(path_config_train,"r"))
-        config_data = yaml.safe_load(open(path_config_data,"r"))
-        config_model = yaml.safe_load(open(path_config_model,"r"))
+        config_train = yaml.unsafe_load(open(path_config_train,"r"))
+        config_data = yaml.unsafe_load(open(path_config_data,"r"))
+        config_model = yaml.unsafe_load(open(path_config_model,"r"))
         
         return config_train, config_data, config_model
     
@@ -379,9 +380,9 @@ class GenerativeLightningModule(pl.LightningModule):
         
         os.makedirs(dir_, exist_ok=True)
         
-        yaml.dump(train_args, open( os.path.join(dir_, "trainer.yaml"), "w" ) )
-        yaml.dump(data_args, open( os.path.join(dir_, "data.yaml"), "w" ) )
-        yaml.dump(model_args, open( os.path.join(dir_, "model.yaml"), "w" ) )
+        yaml.dump(train_args, open( os.path.join(dir_, "config_trainer.yaml"), "w" ) )
+        yaml.dump(data_args, open( os.path.join(dir_, "config_data.yaml"), "w" ) )
+        yaml.dump(model_args, open( os.path.join(dir_, "config_model.yaml"), "w" ) )
         
     def save_scalers(self, scaler_features, scaler_target, scaler_topo, dir_) -> None:
         
@@ -399,10 +400,8 @@ class GenerativeLightningModule(pl.LightningModule):
         train_parser.add_argument("--exp_name", default='vaegan_benchmark', type=str )        
         train_parser.add_argument("--gpus", default=1, type=int)
         
-        train_parser.add_argument("--sample_size", default=25)
-        
-        train_parser.add_argument("--nn_name", default="VAEGAN", choices=["VAEGAN"])
-        
+        train_parser.add_argument("--sample_size", default=500, type=int)
+                
         train_parser.add_argument("--max_epochs", default=300, type=int)
         train_parser.add_argument("--batch_size", default=48, type=int)
         train_parser.add_argument("--batch_size_inf", default=128, type=int)
@@ -414,7 +413,7 @@ class GenerativeLightningModule(pl.LightningModule):
         train_parser.add_argument("--val_check_interval", default=1.0, type=float)
         train_parser.add_argument("--prefetch", type=int, default=2, help="Number of batches to prefetch" )
                 
-        train_parser.add_argument("--ckpt_dir", type=str, default='Checkpoints')
+        train_parser.add_argument("--ckpt_dir", type=str, default='./VAEGAN/Checkpoints')
         
         train_args = train_parser.parse_known_args()[0]
                 
@@ -445,7 +444,7 @@ class GenerativeLightningModule(pl.LightningModule):
     def train_model( train_args, data_args, model_args ):
         # Define the trainer    
         root_dir = train_args.ckpt_dir if train_args.ckpt_dir else ''
-        dir_model = os.path.join(root_dir,f"{train_args.exp_name}/{train_args.nn_name}")
+        dir_model = os.path.join(root_dir,f"{train_args.exp_name}")
         
         # Adjusting val_check_interval
         # If val_check_interval is a float then it represents proportion of an epoc
@@ -527,12 +526,19 @@ class GenerativeLightningModule(pl.LightningModule):
     def test_model( train_args, data_args):
 
         root_dir = train_args.ckpt_dir if train_args.ckpt_dir else ''
-        dir_model = os.path.join(root_dir,f"{train_args.exp_name}/{train_args.nn_name}")
+        dir_model = os.path.join(root_dir,f"{train_args.exp_name}")
         dir_model_version = os.path.join(dir_model, "lightning_logs",f"version_{train_args.test_version}")
         
         # Load Confifs and Scalers
+        # allowing user to update test parameters used
+        changed_args_t = { k:getattr(train_args,k) for k in ['sample_size','batch_size_inf'] if hasattr(train_args,k) }
+        changed_args_d = { k:getattr(data_args,k) for k in ['test_start','test_end','data_dir'] if hasattr(data_args,k) }
         train_args, data_args, model_args = GenerativeLightningModule.load_configs( dir_model_version )
-        scaler_features, scaler_target = GenerativeLightningModule.load_scalers( dir_model_version )
+        
+        for k,v in changed_args_t.items(): setattr(train_args,k,v)
+        for k,v in changed_args_d.items(): setattr(data_args,k,v)
+        
+        scaler_features, scaler_target, scaler_topo = GenerativeLightningModule.load_scalers( dir_model_version )
         
         checkpoint_path = next( ( elem for elem in glob.glob(os.path.join( dir_model_version, "checkpoints", "*")) 
                                     if elem[-4:]=="ckpt"))
@@ -551,7 +557,8 @@ class GenerativeLightningModule(pl.LightningModule):
                                          dconfig=data_args,
                                     xarray_decode=True,
                                     scaler_features=scaler_features, 
-                                    scaler_target=scaler_target)
+                                    scaler_target=scaler_target,
+                                    scaler_topo=scaler_topo)
     
         dl_test = DataLoader(ds_test, train_args.batch_size, 
                                 drop_last=False,
@@ -560,11 +567,12 @@ class GenerativeLightningModule(pl.LightningModule):
                                 persistent_workers=False )
 
         # Define Lightning Module
-        glm = GenerativeLightningModule(scaler_features,scaler_target, neural_net)
+        lightning_module = GenerativeLightningModule(scaler_features,scaler_target, neural_net, log_dir=dir_model_version, dconfig=data_args)
+      
         
         # Test the Trainer
-        trainer.test_model(
-            glm,
+        trainer.test(
+            lightning_module,
             ckpt_path=checkpoint_path,
             dataloaders=dl_test)
 
@@ -585,7 +593,7 @@ if __name__ == '__main__':
     if train_args.test_version==None:
         GenerativeLightningModule.train_model(train_args, data_args, model_args)
     else:
-        GenerativeLightningModule.test( train_args, data_args )
+        GenerativeLightningModule.test_model( train_args, data_args )
     
 
     

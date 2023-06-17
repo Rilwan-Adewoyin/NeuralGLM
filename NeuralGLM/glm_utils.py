@@ -151,21 +151,6 @@ MAP_DISTRIBUTION_LOSS = {
     'gamma_hurdle':GammaHurdleNLLLoss
 }
 
-def tuple_type(strings):
-    # if isinstance(str, strings):
-    if isinstance(strings, tuple):
-        return strings
-
-    strings = strings.replace("(", "").replace(")", "")
-    if "." in strings:
-        mapped_float = map(float, strings.split(","))
-        mapped = mapped_float
-    else:
-        mapped_int = map(int, strings.split(","))
-        mapped = mapped_int
-
-    return tuple(mapped)
-
 
 class GLMMixin:
 

@@ -1,16 +1,14 @@
 from dataloaders import Era5EobsDataset
 from typing import Union
 import torch
-# from torch._C import Value
-# from torch.optim import lr_scheduler
-from torch import nn
+
 from glm_utils import GLMMixin
 from transformers.optimization import Adafactor, AdafactorSchedule
 import pickle
 from collections import defaultdict
 import os
 from better_lstm import LSTM
-# import einops
+
 import pytorch_lightning as pl
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import argparse
@@ -23,14 +21,15 @@ from typing import Dict, Any
 import json
 import pandas as pd
 import numpy as np
-# import torch_optimizer as optim
+
 from transformers import get_constant_schedule_with_warmup
-# from collections import OrderedDict
+
 import gc
 from copy import deepcopy
 #python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
-from  glm_utils import tuple_type
+from  utils import tuple_type
+
 class NeuralDGLM(pl.LightningModule, GLMMixin):
     
     glm_type = "DGLM"

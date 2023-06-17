@@ -42,7 +42,7 @@ def log_exp(x):
     """
     lt = torch.where(torch.exp(x)<1000)
     if lt[0].shape[0] > 0:
-        x[lt] = torch.log(1+torch.exp(x[lt]))
+        x[lt] = torch.log(1+torch.exp(x[lt])).to(x)
     return x
 
 def force_positive(x):

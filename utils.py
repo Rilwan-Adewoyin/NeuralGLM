@@ -73,3 +73,19 @@ def _format_checkpoint_name(
         filename = cls.CHECKPOINT_JOIN_CHAR.join([prefix, filename])
 
     return filename
+
+
+def tuple_type(strings):
+    # if isinstance(str, strings):
+    if isinstance(strings, tuple):
+        return strings
+
+    strings = strings.replace("(", "").replace(")", "")
+    if "." in strings:
+        mapped_float = map(float, strings.split(","))
+        mapped = mapped_float
+    else:
+        mapped_int = map(int, strings.split(","))
+        mapped = mapped_int
+
+    return tuple(mapped)

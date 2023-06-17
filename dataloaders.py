@@ -28,7 +28,7 @@ import glob
 from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.data import IterableDataset
 import random
-from glm_utils import tuple_type
+from utils import tuple_type
 from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper
 from frozendict import frozendict
 from collections import OrderedDict
@@ -1671,9 +1671,10 @@ class Era5EobsTopoDataset_v2(Dataset):
                     ) -> None:
         super().__init__()
 
-        self.path_to_rain = '/mnt/Data1/akann1w0w1ck/NeuralGLM/Data/uk_rain/eobs_true_rainfall_197901-201907_uk.nc'
-        self.path_to_elevation = '/mnt/Data1/akann1w0w1ck/NeuralGLM/Data/uk_rain/topo_0.1_degree.grib'
-        self.path_to_fields = '/mnt/Data1/akann1w0w1ck/NeuralGLM/Data/uk_rain/model_fields_1979-2019.nc'
+        #'/mnt/Data1/akann1w0w1ck/NeuralGLM/Data
+        self.path_to_rain = os.path.join( dconfig.data_dir,'uk_rain/eobs_true_rainfall_197901-201907_uk.nc')
+        self.path_to_elevation = os.path.join( dconfig.data_dir,'uk_rain/topo_0.1_degree.grib')
+        self.path_to_fields = os.path.join( dconfig.data_dir,'uk_rain/model_fields_1979-2019.nc')
         self.dconfig = dconfig
         self.xarray_decode = xarray_decode
         
@@ -1731,7 +1732,7 @@ class Era5EobsTopoDataset_v2(Dataset):
         if self.target_norm_method == 'log':
             target = torch.log10(target+1)
         elif self.target_norm_method == 'scale':
-            # target = (target * self.scaler_target_scale)
+            target = (target * self.scaler_target_scale)
             pass
         
         
@@ -1892,9 +1893,8 @@ class Era5EobsTopoDataset_v2(Dataset):
         parser.add_argument("--input_shape", default=(6,), type=tuple_type ) #TODO: need to roll together input_shape and outer_box_dim logic into one variable. Currently it only refers to the channel depth variable 
         parser.add_argument("--output_shape", default=(1,1), type=tuple_type ) #NOTE: this refers to the depth of the output i.e. do we predict mean and var term or just mean
 
-        # parser.add_argument("--data_dir", default="./Data/uk_rain", type=str)
-        # parser.add_argument("--rain_fn", default="eobs_true_rainfall_197901-201907_uk.nc", type=str)
-        # parser.add_argument("--mf_fn", default="model_fields_1979-2019.nc", type=str)
+        parser.add_argument("--data_dir", default="./Data/uk_rain", type=str)
+        
 
         parser.add_argument("--train_start", type=str, default="1979")
         parser.add_argument("--train_end", type=str, default="1993-07")

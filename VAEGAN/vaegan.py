@@ -1,8 +1,10 @@
 
+import os, sys
+sys.path.append(os.getcwd())
 import torch
 from torch import nn
 import argparse
-from  glm_utils import tuple_type
+from  utils import tuple_type
 import einops
 
     
