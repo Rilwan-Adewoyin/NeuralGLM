@@ -1,6 +1,5 @@
 
-import os, sys
-sys.path.append(os.getcwd())
+import os
 from dataloaders import Era5EobsTopoDataset_v2
 import numpy as np
 import torch
@@ -450,7 +449,7 @@ class GenerativeLightningModule(pl.LightningModule):
         # If val_check_interval is a float then it represents proportion of an epoc
         trainer = pl.Trainer(gpus=train_args.gpus,
                             default_root_dir = dir_model,
-                            callbacks =[EarlyStopping(monitor="val_mse", patience=1000),
+                            callbacks = [EarlyStopping(monitor="val_mse", patience=1000),
                                             ModelCheckpoint(
                                                 monitor="val_mse",
                                                 filename='{epoch}-{step}-{val_mse:.3f}',

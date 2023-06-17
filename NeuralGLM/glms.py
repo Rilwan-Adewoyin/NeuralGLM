@@ -587,7 +587,6 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         parser.add_argument("--pixel_sample_prop", default=0.7, type=float ,help="")
 
         # Compound Poisson arguments
-        parser.add_argument('--cp_version', default=None, type=int)
         parser.add_argument('--max_j', default=None, type=int)
         parser.add_argument('--j_window_size',default=None, type=int)
         parser.add_argument('--target_range',default=(0,4), type=tuple_type)

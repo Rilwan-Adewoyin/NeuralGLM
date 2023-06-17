@@ -230,7 +230,7 @@ class CompoundPoisson():
                                                     torch.as_tensor(p) )
         
         self.poisson_dist = Poisson(lambda_, validate_args=validate_args)
-        self.gamma_dist = LogNormal(alpha, beta, validate_args=validate_args)
+        self.gamma_dist = Gamma(alpha, beta, validate_args=validate_args)
 
     def sample(self,sample_size=(1,)):
 

@@ -1,6 +1,4 @@
 
-import os, sys
-sys.path.append(os.getcwd())
 import torch
 from torch import nn
 import argparse
