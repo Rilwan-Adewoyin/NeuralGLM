@@ -2,13 +2,12 @@
 *.cfg
 *.ini
 *.conf
-*launch.json
+*.json
 
 # Presentation Folders
 Data
 Presentations
 RelevantPapers/*
-
 
 # Python / IDE files
 .vscode/settings*
@@ -23,7 +22,6 @@ VAEGAN/Checkpoints/*
 Checkpoints_all/*
 Checkpoints_all_cities/*
 *zip
-
 
 #Shell scripts
 experiment_scripts/*
