@@ -191,7 +191,7 @@ class GLMMixin:
             max = None
         
         elif distribution_name == "compound_poisson":
-            min = kwargs.get('eps',1e-1 )
+            min = kwargs.get('eps',1e-3 )
             max = None
         
         return min, max

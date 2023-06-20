@@ -91,9 +91,9 @@ class HLSTM(nn.Module):
         return output
     
     @staticmethod
-    def parse_model_args(parent_parser):
+    def parse_model_args(parent_parser = None, list_args=None):
         parser = argparse.ArgumentParser(
-            parents=[parent_parser], add_help=True, allow_abbrev=False)
+            parents=[parent_parser] if parent_parser else None, add_help=True, allow_abbrev=False)
 
         parser.add_argument("--num_layers", default=4, type=int)
         parser.add_argument("--hidden_dim", default=64, type=int)
@@ -101,7 +101,7 @@ class HLSTM(nn.Module):
         parser.add_argument("--dropoutw", default=0.35, type=float)
 
             
-        model_args = parser.parse_known_args()[0]
+        model_args = parser.parse_known_args(args=list_args)[0]
         return model_args
 
 class HLSTM_tdscale(nn.Module):
@@ -457,8 +457,8 @@ class HConvLSTM_tdscale(nn.Module):
         return output
     
     @staticmethod
-    def parse_model_args(parent_parser):
-        parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
+    def parse_model_args(parent_parser=None, list_args=None):
+        parser = argparse.ArgumentParser(parents=[parent_parser] if parent_parser else None, add_help=True, allow_abbrev=False)
         parser.add_argument("--num_layers", default=4, type=int)
         parser.add_argument("--hidden_dim", default=64, type=int)
         parser.add_argument("--dropoutw", default=0.35, type=float)
@@ -468,7 +468,7 @@ class HConvLSTM_tdscale(nn.Module):
         parser.add_argument("--heads", default=4, type=float)
         parser.add_argument("--dropouto", default=0.25, type=float)
         parser.add_argument("--dropouti", default=0.25, type=float)
-        model_args = parser.parse_known_args()[0]
+        model_args = parser.parse_known_args(args=list_args)[0]
         return model_args
 
 

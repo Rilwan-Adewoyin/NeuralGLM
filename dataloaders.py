@@ -1425,11 +1425,11 @@ class Era5EobsDataset(IterableDataset):
             ds.rain_data.data_len_per_worker = per_worker_per_location * ds.loc_count
         
     @staticmethod
-    def parse_data_args(parent_parser=None, ):
+    def parse_data_args(parent_parser=None,list_args=None ):
         
         if parent_parser != None:
             parser = argparse.ArgumentParser(
-                parents=[parent_parser], add_help=True, allow_abbrev=False)
+                parents=[parent_parser] if parent_parser else None, add_help=True, allow_abbrev=False)
         else:
             parser = argparse.ArgumentParser( add_help=True, allow_abbrev=False )
 
@@ -1455,19 +1455,19 @@ class Era5EobsDataset(IterableDataset):
         # parser.add_argument("--target_range", nargs='+', default=[0,4])
 
         parser.add_argument("--train_start", type=str, default="1979")
-        parser.add_argument("--train_end", type=str, default="2009")
+        parser.add_argument("--train_end", type=str, default="1995-03")
 
-        parser.add_argument("--val_start", type=str, default="2009")
-        parser.add_argument("--val_end", type=str, default="2014")
+        parser.add_argument("--val_start", type=str, default="1995-03")
+        parser.add_argument("--val_end", type=str, default="1999-07")
 
-        parser.add_argument("--test_start", type=str, default="2014")
+        parser.add_argument("--test_start", type=str, default="1999")
         parser.add_argument("--test_end", type=str, default="2019-07")
 
         parser.add_argument("--min_rain_value", type=float, default=0.5)
-        parser.add_argument("--gen_size", type=int, default=8, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
-        parser.add_argument("--gen_size_test", type=int, default=480, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
-        parser.add_argument("--cache_gen_size", type=int, default=4, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
-        parser.add_argument("--cache_gen_size_test", type=int, default=140, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--gen_size", type=int, default=50, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--gen_size_test", type=int, default=50, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--cache_gen_size", type=int, default=300, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--cache_gen_size_test", type=int, default=300, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
         
         parser.add_argument("--shuffle", type=lambda x: bool(int(x)), default=True, choices=[0,1] )
         
@@ -1475,7 +1475,7 @@ class Era5EobsDataset(IterableDataset):
         parser.add_argument("--data_load_method", type=str, default='xarray_mult_files_on_disk', 
                             choices=['xarray_mult_files_on_disk', 'xarray_single_file_in_mem', 'netcdf4_single_file_on_disk'])
         
-        dconfig = parser.parse_known_args()[0]
+        dconfig = parser.parse_known_args(args=list_args)[0]
         
         dconfig.locations = sorted(dconfig.locations)
         dconfig.locations_test = sorted(dconfig.locations_test)
@@ -1881,11 +1881,11 @@ class Era5EobsTopoDataset_v2(Dataset):
         return dict_data
         
     @staticmethod
-    def parse_data_args(parent_parser=None, ):
+    def parse_data_args(parent_parser=None, list_args=None ):
         
         if parent_parser != None:
             parser = argparse.ArgumentParser(
-                parents=[parent_parser], add_help=True, allow_abbrev=False)
+                parents=[parent_parser] if parent_parser else None, add_help=True, allow_abbrev=False)
         else:
             parser = argparse.ArgumentParser( add_help=True, allow_abbrev=False )
 

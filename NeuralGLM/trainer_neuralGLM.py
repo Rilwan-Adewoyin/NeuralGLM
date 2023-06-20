@@ -1,6 +1,7 @@
 import netCDF4
 from netCDF4 import Dataset as nDataset
-import os
+import os, sys
+sys.path.append(os.getcwd())
 import yaml
 
 import torch
@@ -67,7 +68,7 @@ def train( train_args, data_args, glm_args, model_args ):
                                             auto_insert_metric_name=True,
                                             save_top_k=1)],
                         enable_checkpointing=True,
-                        precision=16,
+                        precision=32,
                         max_epochs=train_args.max_epochs,
                         num_sanity_val_steps=0,
                         limit_train_batches=20 if train_args.debugging else None,
@@ -185,7 +186,7 @@ def test( train_args, data_args, glm_args ):
                         save_hparams=False)
     
     trainer = pl.Trainer(resume_from_checkpoint=checkpoint_path, 
-                        precision=16,
+                        precision=32,
                         enable_checkpointing=not train_args.debugging,
                         logger=False,
                         gpus=train_args.gpus,
@@ -218,12 +219,12 @@ def test( train_args, data_args, glm_args ):
     # Test the Trainer
     trainer.test(glm, dataloaders=dl_test)
 
-if __name__ == '__main__':
 
-    parent_parser = ArgumentParser(add_help=False, allow_abbrev=False)
+def parse_train_args(parent_parser=None, list_args=None):
+    
 
     # Train args
-    train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
+    train_parser = argparse.ArgumentParser(parents=[parent_parser] if parent_parser else None, add_help=True, allow_abbrev=False)
     train_parser.add_argument("--exp_name", default='default', type=str )        
     train_parser.add_argument("--gpus", default=1)
     train_parser.add_argument("--sample_size", default=100)
@@ -247,7 +248,41 @@ if __name__ == '__main__':
     train_parser.add_argument("--ckpt_dir",type=str, default='')
     
     
-    train_args = train_parser.parse_known_args()[0]
+    train_args = train_parser.parse_known_args(args=list_args)[0]
+
+    return train_args
+
+if __name__ == '__main__':
+
+    parent_parser = ArgumentParser(add_help=False, allow_abbrev=False)
+
+    # # Train args
+    # train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
+    # train_parser.add_argument("--exp_name", default='default', type=str )        
+    # train_parser.add_argument("--gpus", default=1)
+    # train_parser.add_argument("--sample_size", default=100)
+    # train_parser.add_argument("--dataset", default="uk_rain", choices=["toy","australia_rain","uk_rain"])
+    # train_parser.add_argument("--nn_name", default="HConvLSTM_tdscale", choices=["MLP","HLSTM","HLSTM_tdscale", "HConvLSTM_tdscale"])
+    # train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
+    # train_parser.add_argument("--max_epochs", default=300, type=int)
+    # train_parser.add_argument("--batch_size", default=24, type=int)
+    # train_parser.add_argument("--batch_size_test", default=720, type=int)
+    
+    # train_parser.add_argument("--debugging",action='store_true', default=False )
+    # train_parser.add_argument("--workers", default=2, type=int )
+    # train_parser.add_argument("--workers_test", default=6, type=int )
+       
+    
+    # train_parser.add_argument("--test_version",default=None, type=int, required=False ) 
+    # train_parser.add_argument("--val_check_interval", default=1.0, type=float)
+    # train_parser.add_argument("--prefetch",type=int, default=2, help="Number of batches to prefetch" )
+    # train_parser.add_argument("--prefetch_test",type=int, default=4, help="Number of batches to prefetch" )
+    # train_parser.add_argument("--hypertune",type=bool, default=False)
+    # train_parser.add_argument("--ckpt_dir",type=str, default='')
+    
+    
+    # train_args = train_parser.parse_known_args()[0]
+    train_args = parse_train_args(parent_parser)
     
     # add model specific args
     model_args = MAP_NAME_NEURALMODEL[train_args.nn_name].parse_model_args(parent_parser)

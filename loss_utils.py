@@ -329,7 +329,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
     def __init__(self, *, full: bool = True, eps: float = 1e-6, reduction: str = 'mean', pos_weight=1, **kwargs ) -> None:
         super(CompoundPoissonGammaNLLLoss, self).__init__(None, None, reduction)
         self.full = full
-        self.eps = torch.finfo(torch.float16).eps
+        self.eps = torch.finfo(torch.float32).eps
         self.bce_logits = torch.nn.BCEWithLogitsLoss(reduction='sum')
         self.register_buffer('pos_weight',torch.tensor([pos_weight]) )
         self.register_buffer('pi',torch.tensor(math.pi) )
@@ -339,53 +339,122 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         self.j_window_size = kwargs.get('j_window_size', 24)
         self.register_buffer('j_window_size_float', torch.as_tensor( kwargs.get('j_window_size', 24.0), dtype=torch.float) )
         self.register_buffer('j_window', torch.arange(start=-self.j_window_size+1, end=self.j_window_size, step=1, dtype=torch.float, requires_grad=False) )
+
+        self.jensens_approx = kwargs.get('jensens_approx', False)
+        self.approx_func = kwargs.get('approx_fun', 'gosper')
         
         # Check validity of reduction mode
         if self.reduction not in  ['none','mean','sum']:
             raise ValueError(self.reduction + " is not valid")
-        
+
+    def gosper_gamma(self, x):
+        outp = torch.sqrt((2*x + 1/3) * self.pi) * ((x/e) ** x)
+        return outp
+    
+    def log_gosper_gamma(self, x):
+        outp = 0.5*torch.log(2*x + 1/3)  + 0.5*torch.log(self.pi) + x*torch.log(x) - x
+        return outp
+
     def nll_zero(self, mu, disp, p ):
-        #L=0
+        #y=0
         ll = -mu.pow(2-p) * disp.pow(-1) * (2-p).pow(-1)
+
+        log_ll = (2-p)*torch.log(-mu) + -1*torch.log(disp) + -1*torch.log(2-p)
+
+        ll = torch.exp(log_ll)
+
         return -ll
 
     def nll_positive(self, obs, mu, disp, p, **kwargs  ):
         #L>0
         
-        #
-        lambda_ = l = mu.pow(2-p) / ( disp * (2-p) )
-        alpha = a = (2-p) / (p-1)  #from the gamma distribution
-        beta = b = disp*(p-1)*mu.pow(p-1)
-        L = obs
+        # # Poisson and Gamma params
+        # lambda_ = l = mu.pow(2-p) / ( disp * (2-p) )
+        # alpha = a = (2-p) / (p-1)  #from the gamma distribution
+        # beta = b = mu.pow(p-1) / ( disp*(p-1) )
+
+        y = obs
         theta = disp
+        alpha = a = (2-p) / (1-p)  #from the gamma distribution
         pi = self.pi
         e = self.e
         
-        C = L*mu.pow(1-p)*(1-p).pow(-1) - mu.pow(2-p)*(2-p).pow(-1)
-        C *=  theta.pow(-1)
+        # log(f) = log( a(y,\phi) ) + 1/\phi * [y\theta - k(\theta)] 
 
+        # log( a(y,\phi) ) = A + B = log( \sum(W_j) ) + log(1/y)
 
+        # C = 1/\phi * [y\theta - k(\theta)]  = exp( D ) = exp( log( 1/\phi * [y\theta - k(\theta)] ) )
 
-        with torch.no_grad():
-            #  jmax is currently calculated using the Stirling formulation. instead use
-            #  the onas method to create an estimation for the value of jmax then in 
-            #  paper state that this approximation holds significantly beeter for low x
-            jmax = L.pow(2-p) * (2-p).pow(-1) * theta.pow(-1)
-            jmax = torch.round(jmax)
-            jmax = torch.where(jmax<self.j_window_size, self.j_window_size_float , jmax )
-            jmax = jmax[:, None].expand( jmax.numel(), (self.j_window_size*2) - 1) #expanding
-            j = (jmax + self.j_window).transpose(0,1) # This is a range of j for each index
+        # D = log( 1/\phi * [y\theta - k(\theta)] = E + F = log( 1/\phi)  + log( y\theta - k(\theta) ) 
+        # F = log( y*mu.pow(1-p)*(1-p).pow(-1) - mu.pow(2-p)*(2-p).pow(-1) ) = log( y*mu.pow(1-p)*(2-p) - mu.pow(2-p)*(1-p) ) - log( (2-p)*(1-p) )
 
-        A = torch.log(L.pow(-1))
+   
+
+        A = B = C = D = E = F = torch.zeros_like(y)
+
+        # # Calculating jmax which we create a window around
+        # #TODO fix this calculation
+        # with torch.no_grad():
+        #     # NOTE: FIXES TO DO
+            
+
+        #     #  jmax is currently calculated using the Stirling formulation. instead use
+        #     #  the onas method to create an estimation for the value of jmax then in 
+        #     #  paper state that this approximation holds significantly beeter for low x
+        #     jmax = y.pow(2-p) * (2-p).pow(-1) * theta.pow(-1)
+        #     jmax = torch.round(jmax)
+        #     jmax = torch.where(jmax<self.j_window_size, self.j_window_size_float , jmax )
+        #     jmax = jmax[:, None].expand( jmax.numel(), (self.j_window_size*2) - 1) #expanding
+        #     j = (jmax + self.j_window).transpose(0,1) # This is a range of j for each index
+
+        
+        # New way to calculated new jmax
+        log_jmax = (2-p)*torch.log(y) + -1*torch.log(2-p) + -1*torch.log(theta)  
+        jmax = torch.exp(log_jmax)
+        half_window_size = self.j_window_size // 2
+
+        jmax = torch.where(jmax<half_window_size, torch.full_like(jmax, half_window_size) , jmax )
+        jmax = jmax[:, None].expand( jmax.numel(), (self.j_window_size*2) - 1) #expanding
+        j_window = torch.arange(-half_window_size, half_window_size, dtype=jmax.dtype, device=jmax.device)
+        j = (jmax + j_window).transpose(0,1) # This is a range of j for each index
+        j = torch.clamp(j, min=0) # ensure no value is less than 0
+
+        
+        
 
         #Therefore we used the improved GammaFunc approximation proposed by Gosper
-        Wj = L.pow(j*a) * (p-1).pow(j*-a) * theta.pow(-j*(1+a)) * (2-p).pow(-j) \
-                *((2*j+1/3)*pi).pow(-0.5) * (j/e).pow(-j) \
-                *((2*j*a+1/3)*pi).pow(-0.5) * ((j*a)/e).pow(-j*a) 
+        if self.approx_method == 'gosper':
+            #Wj = y.pow(j*-a) * (p-1).pow(j*a) * theta.pow(-j*(1-a)) * (2-p).pow(-j) * (j!).pow(-1) * (\GammaFunc(-j*a)).pow(-1)
+
+            Wj_1 = y.pow(j*-a) * (p-1).pow(j*a) * theta.pow(-j*(1-a)) * (2-p).pow(-j) 
+            Wj_2 = self.gosper_gamma(j) # Use Gosper approximation for j!)
+            Wj_3 = self.gosper_gamma(-j*a) # Use Gosper approximation for \GammaFunc(-j*a)      
+            
+            A = ( Wj_1 * Wj_2 * Wj_3).sum(dim=0)
+            A = torch.log(A)
+
+        elif self.approx_method == 'jensen_lanczos':
+            logWj_1 = (-j*a)*torch.log(y) + (a*j)*torch.log(p-1) + (-j*(1-a))*torch.log(theta) + -j*torch.log(2-p)
+            logWj_2 = - torch.lgamma(j+1) 
+            logWj_3 = - torch.lgamma(-j*a)
+
+            A = ( logWj_1 + logWj_2 + logWj_3 ).sum(dim=0)
         
-        B = Wj.sum(dim=0)
-        B = torch.log(B)
+        elif self.approx_method == 'jensen_gosper':
+            logWj_1 = (-j*a)*torch.log(y) + (a*j)*torch.log(p-1) + (-j*(1-a))*torch.log(theta) + -j*torch.log(2-p)
+            logWj_2 = - self.log_gosper_gamma(j+1) 
+            logWj_3 = - self.log_gosper_gamma(-j*a)
+
+            A = ( logWj_1 + logWj_2 + logWj_3 ).sum(dim=0)
+
         
+        B = -1*torch.log(y)
+
+        F = torch.log( y*mu.pow(1-p)*(2-p) - mu.pow(2-p)*(1-p) ) - torch.log( 2-p) + torch.log( 1-p )
+        E = -1*torch.log( theta )
+        D = E + F
+        C = torch.exp(D)
+
         ll = A + B + C
 
         return -ll 
@@ -427,7 +496,6 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
         # Clamping for stability
         disp = disp.clone()
-        # rain = rain.clone()
         p = p.clone()
         with torch.no_grad():
             if disp.numel()>0:
@@ -436,6 +504,8 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
         # Gathering indices to seperate days of no rain from days of rain
         count = did_rain.numel()
+
+        # Rainy days juded as 
         indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
         indices_non_rainydays = torch.where(did_rain.view( (1,-1))==0)
 
@@ -452,7 +522,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         p_non_rainydays = p.view((1,-1))[indices_non_rainydays]
 
         # Calculating loss for non rainy days
-        loss_norain = self.nll_zero(mu=mu_non_rainydays, disp=disp_non_rainydays, p = p_non_rainydays  )
+        loss_norain = self.nll_zero(mu=mu_non_rainydays, disp=disp_non_rainydays, p = p_non_rainydays, rain=rain_non_rainydays  )
         
         # Calculating loss for rainy days
         loss_rain = self.nll_positive(obs= rain_rainydays, mu=mu_rainydays, disp=disp_rainydays, p=p_rainydays, global_step=kwargs.get('global_step') )

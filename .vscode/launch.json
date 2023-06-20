@@ -12,214 +12,203 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "cwd": "${fileDirname}",
-            "justMyCode": false,
-            
+            "justMyCode": false            
         },
+
         {
-            "name": "Python: Gamma Hurdle",
+            "name": "Python: Test DGLM CPGamma",
+            "type": "python",
+            "request": "launch",
+            "justMyCode":false,
+            "program": "./NeuralGLM/trainer_neuralGLM.py",
+            "console": "integratedTerminal",
+            "cwd": "/home/akann1w0w1ck/NeuralGLM",
+            "env":{
+                "CUDA_VISIBLE_DEVICES":"1",
+                "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
+                
+            },
+            "args": [
+                "--exp_name", "debugging",
+
+                "--mu_link_name", "xmult_exponential_yshifteps",
+                "--mu_params", "0.5,0.0001",
+                "--dispersion_distribution_name", "uniform_positive",
+                "--dispersion_link_name", "xshiftn_relu_timesm_yshifteps",
+                "--disp_params", "0.5,6.0",
+                "--p_link_name", "divn_sigmoid_clampeps_yshiftm",
+                "--p_params", "2,1",
+                "--j_window_size", "6",
+                "--approx_method", "gosper", 
+                // "--approx_method", "jensen_gosper", 
+                // "--approx_method", "jensen_lanczos", 
+                
+
+                // "--test_version","0",
+                "--train_start","1979",
+                "--train_end","1995-03",
+
+                "--val_start","1995",
+                "--val_end","1999-07",
+
+                "--test_start","1999",
+                "--test_end","2019-07",
+
+                "--target_range", "0,2",
+
+                
+
+                // "--test_end","1988-12",
+                "--locations", "All",
+                "--locations_test", "All",
+                "--target_distribution_name","compound_poisson",
+                
+                "--gen_size","50",
+                "--cache_gen_size","300",
+                "--gen_size_test","240",
+                "--cache_gen_size_test","140",
+                "--workers_test","6",
+                "--batch_size_test","720",
+
+                "--gpus","1",
+
+                "--debugging",
+                
+                "--learning_rate", "0.00001",
+                "--beta1", "0.8",
+                "--beta2", "0.85",
+                "--eps", "1e-8",
+                "--weight_decay", "0.0001",
+
+
+                "--ckpt_dir","/mnt/Data1/akann1w0w1ck/NeuralGLM/",
+                "--data_dir", "/mnt/Data1/akann1w0w1ck/NeuralGLM/Data/uk_rain",
+
+                "--data_load_method", "xarray_mult_files_on_disk"
+                
+            ],
+            
+        },        
+        {
+            "name": "Python: VAEGAN",
             "type": "python",
             "request": "launch",
             "program": "${file}",
+            "justMyCode":true,
             "console": "integratedTerminal",
             "cwd": "${fileDirname}",
+            "env":{
+                "CUDA_VISIBLE_DEVICES":"0"
+            },
             "args": [
-                "--gpus","1",
-                "--dataset","australia_rain",
-                "--nn_name","HLSTM",
-                "--glm_name","DGLM",
-                "--max_epochs", "150",
+                    "--exp_name","20y_20y",
+                    "--gpus","1",
+                    
+                    "--norm", "batch",
+                                        
+                    // "--max_epochs", "300",
+                    "--max_epochs", "3000",
 
-                "--target_distribution_name","gamma_hurdle",
 
-                "--mu_distribution_name","uniform_positive",
-                "--mu_link_name","xshiftn_relu_timesm_yshifteps",
-                "--mu_params","0.4,6.0",
+                    "--batch_size","64",
+                    "--batch_size_inf","180",
+                    "--workers","8",
 
-                "--dispersion_distribution_name","uniform_positive",
-                "--dispersion_link_name","xshiftn_relu_timesm_yshifteps",
-                "--disp_params","0.5,6.0",
+                    // "--filters_gen", "84",
+                    // "--filters_disc","332",
 
-                "--pos_weight","1.0",
+                    "--filters_gen", "54",
+                    // "--filters_disc","24",
 
-                "--target_range","0,8",
-                "--debugging"
+                    "--latent_variables","26",
+                    "--noise_channels","26",
+
+                    "--forceconv",
+
+                    // "--debugging",                   
+                    "--train_start","1979",
+                    "--train_end","1993-03",
+
+                    // "--train_start","1980",
+                    // "--train_end","1985",
+                    
+                    "--val_start","1993-07",
+                    "--val_end","1999",
+                    // "--val_start","1980",
+                    // "--val_end","1985",
+
+                    
+                    // "--test_start","1980",
+                    // "--test_end","1985",
+
+                    "--test_start","1999",
+                    "--test_end","2019-07"                    
             ],
             
         },
         {
-            "name": "Python: LogNormal Hurdle",
+            "name": "Python: CONVCNP",
             "type": "python",
             "request": "launch",
             "program": "${file}",
+            "justMyCode":true,
             "console": "integratedTerminal",
             "cwd": "${fileDirname}",
-            
+            "env":{
+                "CUDA_VISIBLE_DEVICES":"1"
+            },
             "args": [
-                "--gpus","1",
-                "--dataset","australia_rain",
-                "--nn_name","HLSTM",
-                "--glm_name","DGLM",
-                "--max_epochs", "150",
+                    "--exp_name","20y_20y",
+                    "--gpus","1",
+                    
+                    "--max_epochs", "200",
+                    
+                    "--target_norm_method","scale",
 
-                "--target_distribution_name","lognormal_hurdle",
+                    "--batch_size","32",
+                    "--batch_size_inf","180",
+                    "--workers","8",
 
-                "--mu_distribution_name","uniform_positive",
-                "--mu_link_name","xmult_exponential_yshifteps_log",
-                "--mu_params","1.5,0.001",
+                    // "--debugging",                   
+                    "--train_start","1979",
+                    "--train_end","1993-03",
 
-                "--dispersion_distribution_name","uniform_positive",
-                "--dispersion_link_name","xshiftn_relu_timesm_yshiftn",
-                "--disp_params","0.5,6.0,0.1",
+                    // "--train_start","1980",
+                    // "--train_end","1985",
+                    
+                    "--val_start","1993-07",
+                    "--val_end","1999",
+                    // "--val_start","1980",
+                    // "--val_end","1985",
 
-                "--pos_weight","1.0",
-                "--target_range","0,6",
-                "--debugging"],
+                    // "--test_start","1980",
+                    // "--test_end","1985",
+                    "--test_start","1999",
+                    "--test_end","2019-07"                    
+            ],
             
         },
         {
-            "name": "Python: Compound Poisson v2",
+            "name": "Python: IFS Prediction",
             "type": "python",
             "request": "launch",
             "program": "${file}",
+            "justMyCode":false,
             "console": "integratedTerminal",
             "cwd": "${fileDirname}",
-            
+            "env":{
+                "CUDA_VISIBLE_DEVICES":"1"
+            },
             "args": [
-                
-                "--gpus","1",
-                "dataset","australia_rain",
-                "nn_name","HLSTM",
-                "glm_name","DGLM",
-                "--max_epochs", "150",
-
-                "--target_distribution_name","compound_poisson",
-                "--mu_distribution_name","uniform_positive",
-                "--mu_link_name","xshiftn_relu_timesm_yshifteps",
-                "--mu_params","0.1,10.0",
-                "--dispersion_distribution_name","uniform_positive",
-                "--dispersion_link_name","xshiftn_relu_timesm_yshifteps",
-                "--disp_params","0.5,6.0",
-
-                "--pos_weight","1",
-
-                "--p_link_name","divn_sigmoid_clampeps_yshiftm",
-                "--p_params","2,1",
-
-                "--cp_version","2",
-                "--max_j","12",
-                "--target_range","\(0,2\)",
-                "--debugging"
-                ],  
-        },
-        {
-            "name": "Python: Compound Poisson v3",
-            "type": "python",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal",
-            "cwd": "${fileDirname}",
-            
-            "args": [
-                
-                "--gpus","1",
-                "dataset","australia_rain",
-                "nn_name","HLSTM",
-                "glm_name","DGLM",
-                "--max_epochs", "150",
-
-                "--target_distribution_name","compound_poisson",
-                "--mu_distribution_name","uniform_positive",
-                "--mu_link_name","xshiftn_relu_timesm_yshifteps",
-                "--mu_params","0.5,6.0",
-                "--dispersion_distribution_name","uniform_positive",
-                "--dispersion_link_name","xshiftn_relu_timesm_yshifteps",
-                "--disp_params","0.5,6.0",
-
-                "--p_link_name","divn_sigmoid_clampeps_yshiftm",
-                "--p_params","2,1",
-
-
-                "--pos_weight","1.0",
-
-                "--cp_version","3",
-                "--max_j","12",
-                "--target_range","0,6",
-                "--debugging"],
+                    "--data_dir", "/mnt/Data1/akann1w0w1ck/NeuralGLM/Data/uk_rain",
+                    "--date_start_str", "1979-01-02",
+                    "--date_end_str", "1980",
+                    "--locations", "['All']"
+                    
+            ],
             
         },
-        {
-            "name": "Python: Compound Poisson v4",
-            "type": "python",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal",
-            "cwd": "${fileDirname}",
-            
-            "args": [
-                
-                "--gpus","1",
-                "dataset","australia_rain",
-                "nn_name","HLSTM",
-                "glm_name","DGLM",
-                "--max_epochs", "13",
+          
 
-                "--target_distribution_name","compound_poisson",
-                "--mu_distribution_name","uniform_positive",
-                "--mu_link_name","xshiftn_relu_timesm_yshifteps",
-                "--mu_params","0.1,10.0",
-                "--dispersion_distribution_name","uniform_positive",
-                "--dispersion_link_name","xshiftn_relu_timesm_yshifteps",
-                "--disp_params","0.5,6.0",
-                
-                "--pos_weight","1.0",
-
-                "--p_link_name","divn_sigmoid_clampeps_yshiftm",
-                "--p_params","2,1",
-
-                "--cp_version","4",
-                "--j_window_size","3",
-                "--target_range","0,2",
-                "--debugging"            
- ]
-        },
-        {
-            "name": "Python: Compound Poisson v5",
-            "type": "python",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal",
-            "cwd": "${fileDirname}",
-            
-            "args": [
-                
-                "--gpus","1",
-                "dataset","australia_rain",
-                "nn_name","HLSTM",
-                "glm_name","DGLM",
-                "--max_epochs", "150",
-
-                "--target_distribution_name","compound_poisson",
-                
-                "--mu_distribution_name","uniform_positive",
-                "--mu_link_name","xshiftn_relu_timesm_yshifteps",
-                "--mu_params","0.5,6.0",
-
-                "--dispersion_distribution_name","uniform_positive",
-                "--dispersion_link_name","xshiftn_relu_timesm_yshifteps",
-                "--disp_params","0.5,6.0",
-
-                "--p_link_name","divn_sigmoid_clampeps_yshiftm",
-                "--p_params","2,1",
-
-
-                "--pos_weight","1.0",
-
-                "--cp_version","5",
-                "--j_window_size","3",
-                "--target_range","0,6",
-                "--debugging"
-                
-                ],            
-        },
     ]
 }
