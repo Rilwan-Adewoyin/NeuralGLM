@@ -118,7 +118,13 @@ MAP_LINK_INVFUNC = {
     'sigmoid_yshift1': torch.nn.Sequential( torch.nn.Sigmoid(), Shift(1) ),
     'sigmoid_yshift6': torch.nn.Sequential( torch.nn.Sigmoid(), Shift(6) ),
     'sigmoid_clamp_eps': torch.nn.Sequential( torch.nn.Sigmoid(), Clamp( lb=1e-6, ub=1-1e-6 ) ),
-    'divn_sigmoid_clampeps_yshiftm': lambda factor, shift : torch.nn.Sequential( Multiply(1/factor), torch.nn.Sigmoid(), Clamp( lb=1e-1, ub=1-1e-1 ), Shift(shift) )     
+    'divn_sigmoid_clampeps_yshiftm': lambda factor, shift : torch.nn.Sequential( Multiply(1/factor), torch.nn.Sigmoid(), Clamp( lb=1e-1, ub=1-1e-1 ), Shift(shift) ), 
+
+    # Here the clamping is integrated into the output range which is [1.001, 1.999] for CP models
+    'sigmoid_clampeps_shiftm': lambda eps, m : torch.nn.Sequential( torch.nn.Sigmoid(), Multiply(1-(2*eps)), Shift(eps), Shift(m) )     ,
+
+    # Designed for the CP model to get mu starting at half the range
+    'shiftn_relu_clampeps':lambda shift, eps: torch.nn.Sequential( Shift(shift), torch.nn.ReLU(), Shift(eps) ),
 }
     
 # Maps the distribution name to a list of canonical/common inverse link functions. 

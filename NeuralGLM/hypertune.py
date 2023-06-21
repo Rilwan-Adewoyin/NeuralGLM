@@ -7,7 +7,7 @@ from glms import MAP_NAME_GLM
 from dataloaders import MAP_NAME_DSET
 from trainer_neuralGLM import parse_train_args
 
-#TODO: Make it run on 2 GPUS
+#TODO: Make it run on 2 devices
 
 def objective(trial: optuna.Trial) -> float:
     # Setting Up Fixed params    
@@ -47,7 +47,7 @@ def objective(trial: optuna.Trial) -> float:
                 "--gen_size","50",
                 "--cache_gen_size","300",
                 
-                "--gpus","1",
+                "--devices","1",
 
                 "--debugging",
                 
@@ -81,7 +81,7 @@ def objective(trial: optuna.Trial) -> float:
     
     # define logger and trainer
     logger = TensorBoardLogger(save_dir='logs/', name='my_model', version=trial.number)
-    trainer = Trainer(logger=logger, max_epochs=50, gpus=1)
+    trainer = Trainer(logger=logger, max_epochs=50, devices=1)
     
     # fit the model
     trainer.fit(model)

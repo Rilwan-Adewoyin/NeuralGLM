@@ -350,7 +350,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         # downcasting       
         output['pred_mu'] = output['pred_mu'].numpy().astype(np.float32)
         output['pred_disp'] = output['pred_disp'].numpy().astype(np.float32)
-        output['pred_p'] = output['pred_p'].numpy().astype(np.float16)
+        output['pred_p'] = output['pred_p'].numpy().astype(np.float32)
         output['target_did_rain'] = output['target_did_rain'].numpy().astype(np.float16)
         output['target_rain_value'] = output['target_rain_value'].numpy().astype(np.float16)
         output['idx_loc_in_region'] = output['idx_loc_in_region'].numpy().astype(np.float16)

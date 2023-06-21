@@ -58,7 +58,9 @@ def train( train_args, data_args, glm_args, model_args ):
              
         print("Validation check every {} steps".format(train_args.val_check_interval))
         
-    trainer = pl.Trainer(gpus=train_args.gpus,
+    trainer = pl.Trainer(
+                        accelerator='gpu',
+                        devices=train_args.devices,
                         default_root_dir = dir_model,
                         callbacks =[EarlyStopping(monitor="val_loss/loss", patience=3 if data_args.locations!=["All"] else 3 ),
                                         ModelCheckpoint(
@@ -185,11 +187,13 @@ def test( train_args, data_args, glm_args ):
                         scaler_target=scaler_target,
                         save_hparams=False)
     
-    trainer = pl.Trainer(resume_from_checkpoint=checkpoint_path, 
+    trainer = pl.Trainer(
+                        accelerator='gpu',
+                        resume_from_checkpoint=checkpoint_path, 
                         precision=32,
                         enable_checkpointing=not train_args.debugging,
                         logger=False,
-                        gpus=train_args.gpus,
+                        devices=train_args.devices,
                         default_root_dir = dir_model_version,
                         )
 
@@ -226,18 +230,18 @@ def parse_train_args(parent_parser=None, list_args=None):
     # Train args
     train_parser = argparse.ArgumentParser(parents=[parent_parser] if parent_parser else None, add_help=True, allow_abbrev=False)
     train_parser.add_argument("--exp_name", default='default', type=str )        
-    train_parser.add_argument("--gpus", default=1)
+    train_parser.add_argument("--devices", default=1)
     train_parser.add_argument("--sample_size", default=100)
     train_parser.add_argument("--dataset", default="uk_rain", choices=["toy","australia_rain","uk_rain"])
-    train_parser.add_argument("--nn_name", default="HConvLSTM_tdscale", choices=["MLP","HLSTM","HLSTM_tdscale", "HConvLSTM_tdscale"])
+    train_parser.add_argument("--nn_name", default="HConvLSTM_tdscale", choices=["MLP", "HLSTM", "HLSTM_tdscale", "HConvLSTM_tdscale"])
     train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
     train_parser.add_argument("--max_epochs", default=300, type=int)
     train_parser.add_argument("--batch_size", default=24, type=int)
     train_parser.add_argument("--batch_size_test", default=720, type=int)
     
     train_parser.add_argument("--debugging",action='store_true', default=False )
-    train_parser.add_argument("--workers", default=2, type=int )
-    train_parser.add_argument("--workers_test", default=6, type=int )
+    train_parser.add_argument("--workers", default=8, type=int )
+    train_parser.add_argument("--workers_test", default=8, type=int )
        
     
     train_parser.add_argument("--test_version",default=None, type=int, required=False ) 
@@ -259,7 +263,7 @@ if __name__ == '__main__':
     # # Train args
     # train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
     # train_parser.add_argument("--exp_name", default='default', type=str )        
-    # train_parser.add_argument("--gpus", default=1)
+    # train_parser.add_argument("--devices", default=1)
     # train_parser.add_argument("--sample_size", default=100)
     # train_parser.add_argument("--dataset", default="uk_rain", choices=["toy","australia_rain","uk_rain"])
     # train_parser.add_argument("--nn_name", default="HConvLSTM_tdscale", choices=["MLP","HLSTM","HLSTM_tdscale", "HConvLSTM_tdscale"])

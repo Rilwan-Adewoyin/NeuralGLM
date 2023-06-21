@@ -849,8 +849,8 @@ class Era5EobsDataset(IterableDataset):
                     dict_data['target'] = dict_data['target']*self.target_scale
                     
                     #scaling
-                    dict_data['input'] = dict_data['input'].to(torch.float16).squeeze(-1)
-                    dict_data['target'] = dict_data['target'].to(torch.float16).squeeze(-1)
+                    dict_data['input'] = dict_data['input'].to(torch.float32).squeeze(-1)
+                    dict_data['target'] = dict_data['target'].to(torch.float32).squeeze(-1)
                     dict_data['mask'] = dict_data['mask'].to(torch.bool).squeeze(-1)
                                             
                     li_dicts = [ {key:dict_data[key][i:i+1] if key not in ['li_locations','target_date_window'] else dict_data[key][i]
@@ -1466,8 +1466,8 @@ class Era5EobsDataset(IterableDataset):
         parser.add_argument("--min_rain_value", type=float, default=0.5)
         parser.add_argument("--gen_size", type=int, default=50, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
         parser.add_argument("--gen_size_test", type=int, default=50, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
-        parser.add_argument("--cache_gen_size", type=int, default=300, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
-        parser.add_argument("--cache_gen_size_test", type=int, default=300, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--cache_gen_size", type=int, default=600, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
+        parser.add_argument("--cache_gen_size_test", type=int, default=600, help="Chunk size when slicing the netcdf fies for model fields and rain. When training over many locations, make sure to use large chunk size.")
         
         parser.add_argument("--shuffle", type=lambda x: bool(int(x)), default=True, choices=[0,1] )
         

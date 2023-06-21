@@ -397,7 +397,7 @@ class GenerativeLightningModule(pl.LightningModule):
         # Train args
         train_parser = argparse.ArgumentParser(parents=[parent_parser], add_help=True, allow_abbrev=False)
         train_parser.add_argument("--exp_name", default='vaegan_benchmark', type=str )        
-        train_parser.add_argument("--gpus", default=1, type=int)
+        train_parser.add_argument("--devices", default=1, type=int)
         
         train_parser.add_argument("--sample_size", default=500, type=int)
                 
@@ -447,7 +447,7 @@ class GenerativeLightningModule(pl.LightningModule):
         
         # Adjusting val_check_interval
         # If val_check_interval is a float then it represents proportion of an epoc
-        trainer = pl.Trainer(gpus=train_args.gpus,
+        trainer = pl.Trainer(devices=train_args.devices,
                             default_root_dir = dir_model,
                             callbacks = [EarlyStopping(monitor="val_mse", patience=1000),
                                             ModelCheckpoint(
@@ -548,7 +548,7 @@ class GenerativeLightningModule(pl.LightningModule):
                     precision=16,
                     enable_checkpointing=True,
                     logger=False,
-                    gpus=train_args.gpus,
+                    devices=train_args.devices,
                     default_root_dir=dir_model_version)
 
         # Making Dset
