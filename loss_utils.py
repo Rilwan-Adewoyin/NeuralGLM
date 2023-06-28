@@ -337,7 +337,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         self.tblogger = kwargs.get('tblogger',None)
         
         self.j_window_size = kwargs.get('j_window_size', 24)
-        self.register_buffer('j_window_size_float', torch.as_tensor( kwargs.get('j_window_size', 24.0), dtype=torch.float) )
+        self.register_buffer('j_window_size_float', torch.as_tensor( self.j_window_size, dtype=torch.float) )
         self.register_buffer('j_window', torch.arange(start=-self.j_window_size+1, end=self.j_window_size, step=1, dtype=torch.float, requires_grad=False) )
 
         self.approx_method = kwargs.get('approx_method', 'gosper')
@@ -346,13 +346,12 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         if self.reduction not in  ['none','mean','sum']:
             raise ValueError(self.reduction + " is not valid")
 
-    def gosper_gamma(self, x):
-        x = x - 1 
+    def gosper_approx(self, x): 
+        #Approximation of Gamma function using Gosper's formula
         outp = torch.sqrt((2*x + 1/3) * self.pi) * ((x/self.e) ** x)
         return outp
     
-    def log_gosper_gamma(self, x):
-        x = x-1
+    def log_gosper_approx(self, x):
         outp = 0.5*torch.log(2*x + 1/3)  + 0.5*torch.log(self.pi) + x*torch.log(x) - x
         return outp
 
@@ -371,9 +370,9 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         
         y = obs        
 
-        # # Poisson and Gamma params
+        # Poisson and Gamma params
         # lambda_ = l = mu.pow(2-p) / ( disp * (2-p) )
-        alpha = a = (2-p) / (p-1)  #from the gamma distribution
+        alpha = a = (2-p) / (1-p)  #from the gamma distribution
         # beta = b = mu.pow(p-1) / ( disp*(p-1) )
 
         # Tweedie Exponetial Dispersion Family params
@@ -382,15 +381,24 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
 
         # LogLikelihood for CompoundPoissonGamma distribution
-        # # log(f) = log( a(y,\disp) ) + 1/\disp * [y*theta - kappa] 
-        # # log( a(y,\disp) ) = A + B = log( \sum(W_j) ) + log(1/y)
-        # # 1/\disp * [y*theta - kappa]  = C * D
-        # # C = 1/disp
-        # # D = D1 + D2 =y*theta - kappa
-        # # log(f) = (A + B ) + C*(D1+D2)
+        # log(f) = log( a(y,\disp) ) + 1/\disp * [y*theta - kappa] 
+            # log( a(y,\disp) ) = A + B = log( \sum(W_j) ) + log(1/y)
+            # C = 1/\disp 
+            # D = D1 + D2 = y*theta - kappa
+        # log(f) = (A + B ) + C*(D)
 
         # Calculating jmax which we create a window around            
         log_jmax = (2-p)*torch.log(y) + -1*torch.log(2-p) + -1*torch.log(disp)  
+        jmax = torch.exp(log_jmax)
+        half_window_size = self.j_window_size // 2
+
+        jmax_adj = torch.where(jmax<half_window_size+1,  jmax+(half_window_size+1 - torch.floor(jmax) ) , jmax )
+        jmax_adj = jmax_adj.clamp(max=120.0)
+    
+        jmax_adj: Tensor = jmax_adj[:, None].expand( jmax_adj.numel(), (self.j_window_size) ) #expanding
+        j_window = torch.arange(-half_window_size, half_window_size, dtype=jmax_adj.dtype, device=jmax_adj.device)
+        j = (jmax_adj + j_window).transpose(0,1) # This is a range of j for each index
+        j = torch.clamp(j, min=1.0) # ensure no value is less than 0
 
         # Calculating priors for the activation function to use for mu, y, disp
         # # Ideally want jmax between 1 and 40 w/ starting value of 7.0-> log_jmax between 0 and 3.7 w/starting value of 1.9
@@ -399,70 +407,80 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         # # If scaled target is 0<y<2
         # # We want mu to be between 0 and 1, e.g. starting value of 1.0
         # # TO get log_jmax=1.9 w/ y = 1.0 and p = 1.5 then disp = 0.30
-        
-        jmax = torch.exp(log_jmax)
-        half_window_size = self.j_window_size // 2
 
-        jmax_adj = torch.where(jmax<half_window_size+1,  jmax+(half_window_size+1 - torch.floor(jmax) ) , jmax )
-        jmax_adj = jmax_adj.clamp(max=70.0)
-    
-        jmax_adj: Tensor = jmax_adj[:, None].expand( jmax_adj.numel(), (self.j_window_size) ) #expanding
-        j_window = torch.arange(-half_window_size, half_window_size, dtype=jmax_adj.dtype, device=jmax_adj.device)
-        j = (jmax_adj + j_window).transpose(0,1) # This is a range of j for each index
-        j = torch.clamp(j, min=1.0) # ensure no value is less than 0
-
-        
-        # TODO: Try to use pytorch lgamma distribution  
+        # # but disp=0.3, makes the likelihoods very large so moving disp=0.3 to disp=1.0
+                
         # TODO: Check the significance of the terms of the terms approximation 
         # TODO: Plot the terms which are contributing to the overflow
 
         #Therefore we used the improved GammaFunc approximation proposed by Gosper
         if self.approx_method == 'gosper':
-            #formula: Wj = y.pow(j*-a) * (p-1).pow(j*a) * disp.pow(-j*(1-a)) * (2-p).pow(-j) * (j!).pow(-1) * (\GammaFunc(-j*a)).pow(-1)
+            #formula: Sum Wj = A = y.pow(j*-a) * (p-1).pow(j*a) * disp.pow(-j*(1-a)) * (2-p).pow(-j)  * (j!).pow(-1) * (\GammaFunc(-j*a)).pow(-1)
                 # (\GammaFunc(-j*a)) = gosper(-j*a - 1)
 
             # Original implmentation
             # Wj_1 = y.pow(j*-a) * (p-1).pow(j*a) * disp.pow(-j*(1-a)) * (2-p).pow(-j) 
-            # Wj_2 = self.gosper_gamma(j+1) # Use Gosper approximation for j!)
-            # Wj_3 = self.gosper_gamma(-j*a) # Use Gosper approximation for \GammaFunc(-j*a)      
-            # A = ( Wj_1 * Wj_2 * Wj_3).sum(dim=0)
+            # Wj_2 = self.gosper_approx(j) # Use Gosper approximation for j!)
+            # Wj_3 = self.gosper_approx(-j*a) # Use Gosper approximation for \GammaFunc(-j*a)      
+            # A = Wj = ( Wj_1 * Wj_2.pow(-1) * Wj_3.pow(-1)).sum(dim=0)
 
             # Stable implementation
-            # formula: A= (j * (-ja-1).pow(-a) * y.pow(-a) * disp.pow(1-a) * e.pow(1-a) ).pow(j) x ( (2j+1/3)*pi ).pow(1/2) * ((2(-ja-1)+1/3)*pi).pow(1/2)
-            # A = A1 + A2 + A3
-            # A1 = (j * (-ja-1).pow(-a) * y.pow(-a) * disp.pow(1-a) * e.pow(1-a) ).pow(j)
-            # A2 = ( (2j+1/3)*pi ).pow(1/2)
-            # A3 = ((2(-ja-1)+1/3)*pi).pow(1/2)
-            # A4 = e/(-ja-1)
+            # formula: A = [ y.pow(-a) * (p-1).pow(a) * e.pow(1-a) * (2-p).pow(-1) * disp.pow(-1*(1-a) ) * (2-p).pow(-1) * j.pow(-1) * (-ja-1).pow(-1)  ].pow(j) x ( (2j+1/3)*pi ).pow(-1/2) * ((2(-ja-1)+1/3)*pi).pow(-1/2) * (-ja-1)/e
+            # A = A1 * A2 * A3 * A4
+            # A1 = (y.pow(-a) * (p-1).pow(a) * e.pow(1-a) * (2-p).pow(-1) * disp.pow(-1*(1-a) ) * (2-p).pow(-1) * j.pow(-1) * (-ja-1).pow(-1)  ).pow(j)
+            # A2 = ( (2j+1/3)*pi ).pow(-1/2)
+            # A3 = ((2(-ja-1)+1/3)*pi).pow(-1/2)
+            # A4 = (-ja-1)/e
             
-            # rearranged for stability
-            # B formula ordered: B=B1*B2*B3
-            # B1.pow(1/j) = (y/disp).pow(-a) 
-            # B2.pow(1/j) =  ((-ja-1)/e).pow(-a) 
-            # B3.pow(1/j) = j / (disp * e)
+            # A1 rearranged for stability
+            # A1 formula ordered: A1=A11.pow(j)*A12.pow(j)*A13.pow(j)*A14.pow(j)*A15.pow(j)
+            # A11.pow(1/j) = (y/disp).pow(-a) 
+            # A12.pow(1/j) =  (e/(-ja-1)).pow(a) 
+            # A13.pow(1/j) = (  e / (disp * j)
+            # A14.pow(1/j) = (p-1).pow(a)
+            # A15.pow(1/j) = (2-p).pow(-1)
 
-            A11 = (y/disp).pow(-a)
-            _ = (((-j*a)-1)/self.e)
-            A12 = torch.where(_>0, _, _.abs() ).pow(-a)
-            
-            A13 = j / (disp * self.e)
-            A1 = (A11*A12*A13).pow(j)
+            # A11 = (y/disp).pow(-a)
+            # A12 = ( self.e / ((-j*a)-1) ).pow(-a)
+            # A13 = self.e / (disp * j )
+            # A14 = (p-1).pow(a)
+            # A15 = (2-p).pow(-1)
 
-            A4 = ( (2*j+1/3)*self.pi ).pow(1/2)
-            # Ignore negative values for D
-            _D = ((2*(-j*a)-1)/3*self.pi)
-            D = torch.where(_D>0, _D, _D.abs() ) .pow(1/2)
+            # A11 = A11.pow(j)
+            # A12 = A12.pow(j)
+            # A13 = A13.pow(j)
+            # A14 = A14.pow(j)
+            # A15 = A15.pow(j)
+            # A1 = A11*A12*A13*A14*A15
 
-            E = self.e / ((-j*a)-1)
+            # Repeat the above using log space
+            logA11 = (-a)*torch.log(y/disp)
+            logA12 = (-a)*torch.log( (self.e/((-j*a)-1)).abs() )
+            logA13 = torch.log(self.e) - torch.log(j) - torch.log(disp) 
+            logA14 = a*torch.log(p-1)
+            logA15 = -torch.log(2-p)
+            A1 = torch.exp( logA11 + logA12 + logA13 + logA14 + logA15 )
 
-            A = B * C * D * E   
+            A2 = ( (2*j+1/3)*self.pi ).pow(-1/2)
+            A3 = (((2*(-j*a-1))+1/3)*self.pi).abs().pow(-1/2)
+            A4 =  ((-j*a)-1) / self.e
+            A = A1 * A2 * A3 * A4
+
+            # logA1 = torch.log(A1)
+            # logA2 = torch.log(A2)
+            # logA3 = torch.log(A3)
+            # logA4 = torch.log(A4)
+            # A = torch.exp( logA1 + logA2 + logA3 + logA4 )
 
             A = A.sum(dim=0)
 
-            A = torch.log(A)
+        elif self.approx_method == 'jensen_gosper':
+            logWj_1 = (-j*a)*torch.log(y) + (a*j)*torch.log(p-1) + (-j*(1-a))*torch.log(disp) + -j*torch.log(2-p)
+            logWj_2 = - self.log_gosper_approx(j) 
+            logWj_3 = - self.log_gosper_approx(-j*a-1)
 
-            # A = torch.log(B) + torch.log(C) + torch.log(D) + torch.log(E)
-
+            A = ( logWj_1 + logWj_2 + logWj_3 ).sum(dim=0)
+            
         elif self.approx_method == 'jensen_lanczos':
             logWj_1 = (-j*a)*torch.log(y) + (a*j)*torch.log(p-1) + (-j*(1-a))*torch.log(disp) + -j*torch.log(2-p)
             logWj_2 = - torch.lgamma(j+1) 
@@ -470,21 +488,13 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
             A = ( logWj_1 + logWj_2 + logWj_3 ).sum(dim=0)
         
-        elif self.approx_method == 'jensen_gosper':
-            logWj_1 = (-j*a)*torch.log(y) + (a*j)*torch.log(p-1) + (-j*(1-a))*torch.log(disp) + -j*torch.log(2-p)
-            logWj_2 = - self.log_gosper_gamma(j+1) 
-            logWj_3 = - self.log_gosper_gamma(-j*a)
-
-            A = ( logWj_1 + logWj_2 + logWj_3 ).sum(dim=0)
-
-        
         B = -1*torch.log(y)
 
         C = 1/disp
         D1 = y*theta
         D2 = -kappa
-        
-        ll = (A + B) + C*(D1+D2) #NOTE: NLL should be negative
+        D = D1 + D2
+        ll = (A + B) + C*(D) #NOTE: NLL should be negative
 
         return -ll 
 

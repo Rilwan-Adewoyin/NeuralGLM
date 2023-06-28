@@ -124,7 +124,7 @@ MAP_LINK_INVFUNC = {
     'sigmoid_clampeps_shiftm': lambda eps, m : torch.nn.Sequential( torch.nn.Sigmoid(), Multiply(1-(2*eps)), Shift(eps), Shift(m) )     ,
 
     # Designed for the CP model to get mu starting at half the range
-    'shiftn_relu_clampeps':lambda shift, eps: torch.nn.Sequential( Shift(shift), torch.nn.ReLU(), Shift(eps) ),
+    'scalem_shiftn_relu_clampeps':lambda shift, scale, eps: torch.nn.Sequential( Shift(shift), torch.nn.ReLU(), Multiply(scale) , Shift(eps) ),
 }
     
 # Maps the distribution name to a list of canonical/common inverse link functions. 

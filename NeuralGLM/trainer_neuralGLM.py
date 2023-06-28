@@ -62,7 +62,7 @@ def train( train_args, data_args, glm_args, model_args ):
                         accelerator='gpu',
                         devices=train_args.devices,
                         default_root_dir = dir_model,
-                        callbacks =[EarlyStopping(monitor="val_loss/loss", patience=3 if data_args.locations!=["All"] else 3 ),
+                        callbacks =[EarlyStopping(monitor="val_loss/loss", patience=train_args.patience ),
                                         ModelCheckpoint(
                                             monitor="val_loss/loss",
                                             filename='{epoch}-{step}-{val_loss/loss:.3f}-{val_metric/mse_rain:.3f}',
@@ -74,8 +74,8 @@ def train( train_args, data_args, glm_args, model_args ):
                         max_epochs=train_args.max_epochs,
                         num_sanity_val_steps=0,
                         limit_train_batches=20 if train_args.debugging else None,
-                        limit_val_batches=5 if train_args.debugging else None,
-                        limit_test_batches=5 if train_args.debugging else None,
+                        limit_val_batches=20 if train_args.debugging else None,
+                        limit_test_batches=20 if train_args.debugging else None,
                         val_check_interval=None if train_args.debugging else train_args.val_check_interval
                         )
 
@@ -122,6 +122,7 @@ def train( train_args, data_args, glm_args, model_args ):
                             num_workers=train_args.workers,
                             drop_last=False,
                             pin_memory=True,
+                            shuffle=data_args.shuffle,
                             collate_fn=cf, 
                             worker_init_fn=worker_init_fn,
                             persistent_workers=False #train_args.workers>0,
@@ -236,6 +237,7 @@ def parse_train_args(parent_parser=None, list_args=None):
     train_parser.add_argument("--nn_name", default="HConvLSTM_tdscale", choices=["MLP", "HLSTM", "HLSTM_tdscale", "HConvLSTM_tdscale"])
     train_parser.add_argument("--glm_name", default="DGLM", choices=["DGLM"])
     train_parser.add_argument("--max_epochs", default=300, type=int)
+    train_parser.add_argument("--patience", default=3, type=int)
     train_parser.add_argument("--batch_size", default=24, type=int)
     train_parser.add_argument("--batch_size_test", default=720, type=int)
     
