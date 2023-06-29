@@ -97,7 +97,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         self.mu_distribution_name = mu_distribution_name
         self.mu_link_name = mu_link_name
         self.mu_inverse_link_function = self._get_inv_link(self.mu_link_name, mu_params)
-        
+
         # Dispersion term distribution/link name / inverse_link function
         self.dispersion_distribution_name = dispersion_distribution_name
         self.dispersion_link_name =  dispersion_link_name
@@ -116,9 +116,10 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         self.p_inverse_link_function = self._get_inv_link(self.p_link_name, p_params)
 
         # optimizer params
-        self.optimizer_name = kwargs.get('optimizer_name', 'AdamW')
+        self.optimizer_name = kwargs.get('optimizer_name', 'adamw')
+        self.learning_rate = kwargs.get('learning_rate', 1e-3)
         self.beta1 = beta1
-        if self.optimizer_name == 'adam':
+        if self.optimizer_name == 'adamw':
             self.beta2 = kwargs.get('beta2', 0.999)
             self.eps = kwargs.get('eps', 1e-8)
             self.weight_decay = kwargs.get('weight_decay', 0)
@@ -230,7 +231,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                                                             logits=pred_logits_scaled_masked, 
                                                             p=pred_p_masked, min_rain_value=self.min_rain_value )
         
-        loss.masked_fill_(loss.isnan(), 0)
+        # loss.masked_fill_(loss.isnan(), 0)
 
         # Logging
         if self.debugging and step_name=='train' and pred_mu_masked.numel() != 0:
@@ -533,22 +534,20 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                                 clip_threshold=0.5)
         
             lr_scheduler = AdafactorSchedule(optimizer)
-            # lr_scheduler = get_constant_schedule_with_warmup( optimizer, num_warmup_steps=1000, last_epoch=-1)
         
-        elif self.optimizer_name == 'adam':
+        elif self.optimizer_name == 'adamw':
 
             optimizer = AdamW(self.parameters(), 
                         lr=self.learning_rate, 
                         betas=(self.beta1, self.beta2), # typical values from the literature
-                        eps=self.eps, # typical value from the literature
+                        # eps=self.eps, # typical value from the literature
                         weight_decay=self.weight_decay, # adjust as needed
                         )
             # Number of training steps is number of epochs times number of batches.
-            num_training_steps = self.num_epochs * len(self.train_dataloader())
+            # num_training_steps = self.num_epochs * len(self.train_dataloader())
 
-            lr_scheduler = get_linear_schedule_with_warmup(optimizer, 
-                                                        num_warmup_steps=self.num_warmup_steps, 
-                                                        num_training_steps=num_training_steps)
+            lr_scheduler = get_constant_schedule_with_warmup(optimizer, 
+                                                        num_warmup_steps=1000)
 
         else:
             raise NotImplementedError(f"Optimizer {self.optimizer_name} not implemented")
@@ -597,7 +596,7 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             parents=[parent_parser] if parent_parser else None, add_help=True, allow_abbrev=False)
         parser.add_argument("--target_distribution_name", default="compound_poisson")
 
-        parser.add_argument('--optimizer_name', default='adafactor', type=str, help='optimizer to use for training', choices=['adafactor', 'adam'])
+        parser.add_argument('--optimizer_name', default='adamw', type=str, help='optimizer to use for training', choices=['adafactor', 'adamw'])
         parser.add_argument('--learning_rate', default=1e-3, type=float, help='learning rate')
         parser.add_argument("--beta1", type=float, default=0.9 )
         parser.add_argument("--beta2", type=float, default=0.999 )
@@ -606,21 +605,21 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
         parser.add_argument("--mu_distribution_name", default="normal")
         parser.add_argument("--mu_link_name", default="identity",help="name of link function used for mu distribution")
-        parser.add_argument("--mu_params", default=None, type=tuple_type)
+        parser.add_argument("--mu_params", default=None, type=tuple_type, required=True)
 
         parser.add_argument("--dispersion_distribution_name", default="gamma")
         parser.add_argument("--dispersion_link_name", default="relu",help="name of link function used for mu distribution")
-        parser.add_argument("--disp_params", default=None, type=tuple_type)
+        parser.add_argument("--disp_params", default=None, type=tuple_type, required=True)
 
         parser.add_argument("--p_link_name", default="sigmoid")
-        parser.add_argument("--p_params", default=None, type=tuple_type)
+        parser.add_argument("--p_params", default=None, type=tuple_type, required=True)
 
         parser.add_argument("--pos_weight", default=1.2, type=float, help="The relative weight placed on examples where rain did occur when calculating the loss")
         parser.add_argument("--pixel_sample_prop", default=0.85, type=float, help="")
 
         # Compound Poisson arguments
         parser.add_argument('--j_window_size',default=None, type=int, required=True)
-        parser.add_argument('--target_range',default=(0,4), type=tuple_type)
+        parser.add_argument('--target_range',default=(0,4), type=tuple_type, required=True)
 
         # boolean flag for jensens approx
         parser.add_argument('--approx_method', default='gosper', type=str, choices=['gosper', 'jensen_gosper' ,'jensen_lanczos'], required=True )

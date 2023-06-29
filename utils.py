@@ -77,10 +77,14 @@ def _format_checkpoint_name(
 
 def tuple_type(strings):
     # if isinstance(str, strings):
+    
     if isinstance(strings, tuple):
         return strings
+    
+    strings = strings.strip('"')
 
     strings = strings.replace("(", "").replace(")", "")
+    
     if "." in strings:
         mapped_float = map(float, strings.split(","))
         mapped = mapped_float

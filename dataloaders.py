@@ -51,7 +51,6 @@ from itertools import product
     
 """
 
-
 #classes that allow caching on dictionary
 
 def deep_freeze(thing):
@@ -1045,8 +1044,7 @@ class Era5EobsDataset(IterableDataset):
                                                 "li_locations":(("sample_idx","lookback_target"), np.concatenate(dict_data['li_locations']))[:0] ,
                                                 "target_date_window": ( ("sample_idx",'lookback_target'),np.zeros_like( np.concatenate(dict_data['target_date_window']) )[:0] )
                                             } )
-                                
-                                                            
+                                                               
                 if bool_update_scaler_features: 
                     # reshaping feature into ( num, dims) dimension required by partial_fit
                     dim = dict_data['input'][0].shape[-1]
@@ -1287,8 +1285,6 @@ class Era5EobsDataset(IterableDataset):
         # Creating seperate datasets for each location
         li_feature, li_target, li_target_mask = zip(*[self.select_region(feature, target, target_mask, hw_idxs[0], hw_idxs[1]) for hw_idxs in li_hw_idxs ] )
                 
-
-        
         lcs = locations_ 
         lit = li_target
         li_locs = [

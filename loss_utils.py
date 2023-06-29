@@ -28,7 +28,7 @@ class LogNormalHurdleNLLLoss(_Loss):
     def __init__(self, *, full: bool = False, eps: float = 1e-6, reduction: str = 'mean', pos_weight=1, **kwargs ) -> None:
         super(LogNormalHurdleNLLLoss, self).__init__(None, None, reduction)
         self.full = full
-        self.eps = eps
+        self.register_buffer('eps', torch.tensor(eps))
         self.register_buffer('pos_weight',torch.tensor([pos_weight]))
         self.register_buffer('pi',torch.tensor(math.pi))
         self.bce_logits = torch.nn.BCEWithLogitsLoss(reduction='sum', pos_weight=self.pos_weight)
@@ -337,7 +337,8 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         self.tblogger = kwargs.get('tblogger',None)
         
         self.j_window_size = kwargs.get('j_window_size', 24)
-        self.register_buffer('j_window_size_float', torch.as_tensor( self.j_window_size, dtype=torch.float) )
+        assert self.j_window_size % 2 == 0, "j_window_size must be even"
+
         self.register_buffer('j_window', torch.arange(start=-self.j_window_size+1, end=self.j_window_size, step=1, dtype=torch.float, requires_grad=False) )
 
         self.approx_method = kwargs.get('approx_method', 'gosper')
@@ -396,17 +397,17 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         jmax_adj = jmax_adj.clamp(max=120.0)
     
         jmax_adj: Tensor = jmax_adj[:, None].expand( jmax_adj.numel(), (self.j_window_size) ) #expanding
-        j_window = torch.arange(-half_window_size, half_window_size, dtype=jmax_adj.dtype, device=jmax_adj.device)
+        j_window = torch.arange(-half_window_size, half_window_size, dtype=jmax_adj.dtype, device=jmax_adj.device, requires_grad=False)
         j = (jmax_adj + j_window).transpose(0,1) # This is a range of j for each index
         j = torch.clamp(j, min=1.0) # ensure no value is less than 0
 
         # Calculating priors for the activation function to use for mu, y, disp
         # # Ideally want jmax between 1 and 40 w/ starting value of 7.0-> log_jmax between 0 and 3.7 w/starting value of 1.9
-        # # if 0<y<2, 1<p<2 then y.pow(2-p) is between 0 and 4
+        # # if 0<y<1, 1<p<2 then y.pow(2-p) is between 0 and 1
         # # (2-p).pow(-1) is between 1 and \infty
-        # # If scaled target is 0<y<2
-        # # We want mu to be between 0 and 1, e.g. starting value of 1.0
-        # # TO get log_jmax=1.9 w/ y = 1.0 and p = 1.5 then disp = 0.30
+        # # If scaled target is 0<y<1
+        # # We want mu to be between 0 and 1, e.g. starting value of 0.2 and 
+        # # TO get startubg log_jmax=1.9 w/ 0<y<1 and p = 1.5 then disp = 0.30
 
         # # but disp=0.3, makes the likelihoods very large so moving disp=0.3 to disp=1.0
                 
@@ -494,9 +495,9 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         D1 = y*theta
         D2 = -kappa
         D = D1 + D2
-        ll = (A + B) + C*(D) #NOTE: NLL should be negative
+        ll = (A + B) + C*(D) 
 
-        return -ll 
+        return -ll
 
     def forward(self, rain: Tensor, did_rain:Tensor, mu: Tensor, disp: Tensor, p: Tensor, **kwargs) -> Tensor:
         
@@ -534,12 +535,16 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             raise ValueError("disp has negative entry/entries") 
 
         # Clamping dispersion and p for stability
-        disp = disp.clone()
-        p = p.clone()
-        with torch.no_grad():
-            if disp.numel()>0:
-                disp.clamp_(min=self.eps)
-                p.clamp_(min=1+self.eps, max=2-self.eps)
+        # disp = disp.clone()
+        # p = p.clone()
+        # with torch.no_grad():
+        #     if disp.numel()>0:
+        #         disp.clamp_(min=self.eps)
+        #         p.clamp_(min=1+self.eps, max=2-self.eps)
+
+        if disp.numel()>0:
+            disp = disp.clamp(min=self.eps)
+            p = p.clamp(min=1+self.eps, max=2-self.eps)
 
         # Gathering indices to seperate days of no rain from days of rain
         count = did_rain.numel()

@@ -31,35 +31,27 @@
             "args": [
                 "--exp_name", "debugging",
 
-                // "--mu_link_name", "xmult_exponential_yshifteps",
-                // "--mu_params", "0.5,0.0001",
+
                 "--target_range", "0,1",
 
                 "--mu_link_name", "scalem_shiftn_relu_clampeps",
-                "--mu_params", "1.0,0.5,0.001",
+                "--mu_params", "1.0,0.3,0.001",
 
                 "--dispersion_distribution_name", "uniform_positive",
                 "--dispersion_link_name", "scalem_shiftn_relu_clampeps",
                 // "--disp_params", "0.5,6.0",
-                "--disp_params", "2.0,2.0,0.1",
+                "--disp_params", "1.0,0.18,0.025",
 
                 "--p_link_name", "sigmoid_clampeps_shiftm",
                 "--p_params", "0.05,1.0",
 
-                "--j_window_size", "24",
+                "--j_window_size", "12",
                 "--approx_method", "gosper", 
                 // "--approx_method", "jensen_gosper", 
                 // "--approx_method", "jensen_lanczos", 
                 
 
                 // "--test_version","0",
-
-                // "--train_start","1979",
-                // "--train_end","1995-03",
-                // "--val_start","1995",
-                // "--val_end","1999-07",
-                // "--test_start","1999",
-                // "--test_end","2019-07",
 
 
                 "--train_start","1979",
@@ -69,21 +61,15 @@
                 "--test_start","1979",
                 "--test_end","1979-01-29",
 
-                "--max_epochs", "100",
+                "--max_epochs", "200",
                 "--patience", "30",
 
-
-                
                 // "--test_end","1988-12",
                 "--locations", "All",
                 "--locations_test", "All",
                 "--target_distribution_name","compound_poisson",
                 
-                "--workers", "8",
-
-                "--gen_size","50",
-                "--cache_gen_size","600",
-                "--gen_size_test","600",               
+                "--workers", "8",          
 
                 "--devices","1",
 
@@ -94,7 +80,7 @@
                 "--beta1", "0.8",
                 "--beta2", "0.85",
                 "--eps", "1e-8",
-                "--weight_decay", "0.0001",
+                "--weight_decay", "0.00001",
 
 
                 "--ckpt_dir","/mnt/Data1/akann1w0w1ck/NeuralGLM/",
@@ -122,8 +108,7 @@
                     
                     "--norm", "batch",
                                         
-                    // "--max_epochs", "300",
-                    "--max_epochs", "3000",
+                    "--max_epochs", "300",
 
 
                     "--batch_size","64",
