@@ -5,7 +5,7 @@ sys.path.append(os.getcwd())
 import yaml
 
 import torch
-from torchinfo import summary
+# from torchinfo import summary
 import xarray as xr
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -40,7 +40,7 @@ import utils
 def train( train_args, data_args, glm_args, model_args ):
     # Define the trainer    
     root_dir = train_args.ckpt_dir if train_args.ckpt_dir else ''
-    dir_model = os.path.join(root_dir,"Checkpoints",f"{train_args.exp_name}/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
+    dir_model = os.path.join(root_dir, "Checkpoints", f"{train_args.exp_name}/{train_args.dataset}_{train_args.glm_name}_{train_args.nn_name}_{glm_args.target_distribution_name}")
     
     # Adjusting val_check_interval
     # If val_check_interval is a float then it represents proportion of an epoch
@@ -251,7 +251,6 @@ def parse_train_args(parent_parser=None, list_args=None):
     train_parser.add_argument("--prefetch_test",type=int, default=4, help="Number of batches to prefetch" )
     train_parser.add_argument("--hypertune",type=bool, default=False)
     train_parser.add_argument("--ckpt_dir",type=str, default='')
-    
     
     train_args = train_parser.parse_known_args(args=list_args)[0]
 

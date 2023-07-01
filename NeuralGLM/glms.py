@@ -7,7 +7,6 @@ from transformers.optimization import Adafactor, AdafactorSchedule
 import pickle
 from collections import defaultdict
 import os
-from better_lstm import LSTM
 
 import pytorch_lightning as pl
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
@@ -23,14 +22,13 @@ import pandas as pd
 import numpy as np
 
 from transformers import AdamW, get_linear_schedule_with_warmup, get_constant_schedule_with_warmup
-
+from neuralforecast.losses import MQLoss
 
 import gc
 from copy import deepcopy
-#python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 
 from  utils import tuple_type
-
+from utils import preprocess_hparams
 class NeuralDGLM(pl.LightningModule, GLMMixin):
     
     glm_type = "DGLM"
@@ -82,13 +80,14 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                 "train_start_date","test_set_size_elements","train_set_size_elements",
                 "val_set_size_elements","original_uk_dim"]
         if save_hparams:
-            self.save_hyperparameters(ignore=ignore_list)
+            processed_hparams = {k: preprocess_hparams(v) for k, v in self.__dict__.items() if k not in ignore_list}
+            self.save_hyperparameters(processed_hparams, ignore=ignore_list)
 
         # Target Distribution
         self.target_distribution_name = target_distribution_name
         self.target_distribution = self._get_distribution( self.target_distribution_name )() #target distribution
         self.loss_fct = self._get_loglikelihood_loss_func( target_distribution_name )( pos_weight=pos_weight, **kwargs )  #loss function
-
+        
         # Checking compatibility of target distribution and link functions
         # assert self.check_distribution_link(mu_distribution_name, mu_link_name), "Incompatible mu link function chosen for target distribution"
         # assert self.check_distribution_link(dispersion_distribution_name, dispersion_link_name),  "Incompatible dispersion link function chosen for target distribution"
@@ -130,28 +129,21 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         self.debugging = debugging
         
     def forward(self, x ):
-        
-        output = self.neural_net(x)
+        # Freeze dispersion term for 1st freeze disp steps
+        detach_grads_for_disp = False if self.freeze_disp is None else self.freeze_disp < self.global_step
+        self.neural_net.detach_grads_for_disp = detach_grads_for_disp
+
+        output = self.neural_net(x )
         
         #Applying mean function
         mu = self.mu_inverse_link_function(output['mu'])
         disp = self.dispersion_inverse_link_function(output['disp'])
         p = self.p_inverse_link_function(output['logits']) 
-
-        #clamp dispersion term
-        disp = disp.clone()
-        with torch.no_grad():
-            if self.min_dispersion_output_standardized or self.max_disperion_output_standardized:
-                disp.clamp_(self.min_dispersion_output_standardized, self.max_disperion_output_standardized)
-
-        mu = mu.squeeze(-1)
-        disp = disp.squeeze(-1)
-        p = p.squeeze(-1)
-        output['logits'] = output['logits'].squeeze(-1)
     
-        output['mu'] = mu
-        output['disp'] = disp
-        output['p'] = p
+        output['mu'] = mu.squeeze(-1)
+        output['disp'] = disp.squeeze(-1)
+        output['p'] = p.squeeze(-1)
+        output['logits'] = output['logits'].squeeze(-1)
         
         return output
 
@@ -218,6 +210,17 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                                     pred_disp_scaled_masked, logits=pred_logits_scaled_masked,
                                     p=pred_p_scaled_masked, global_step=self.global_step)
 
+        # If target area is all non-land skip the step
+        if loss.isnan().all():
+            return None
+        else:
+            loss.masked_fill_(loss.isnan(), 0)
+
+        if step_name == 'train':
+            self.logger.experiment.add_histogram('mu', pred_mu_scaled_masked, self.global_step)
+            self.logger.experiment.add_histogram('disp', pred_disp_scaled_masked, self.global_step)
+            self.logger.experiment.add_histogram('p', pred_p_scaled_masked, self.global_step)
+
         #Unscaling predictions for prediction metrics
         pred_mu_masked, pred_disp_masked, pred_p_masked = self.target_distribution.unscale_distribution( 
                                                     pred_mu_scaled_masked.detach(), pred_disp_scaled_masked.detach(),
@@ -227,21 +230,19 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
         target_rain_value_masked = self.unscale_rain(target_rain_value_scaled_masked, self.scaler_target)
 
+        if step_name == 'test':
+            pred_sample = self.target_distribution.sample(pred_mean_masked, pred_disp_masked, pred_p_masked)
+        else:
+            pred_sample = None
+
         pred_metrics = self.loss_fct.prediction_metrics(target_rain_value_masked, target_did_rain_masked, pred_mean_masked,
                                                             logits=pred_logits_scaled_masked, 
-                                                            p=pred_p_masked, min_rain_value=self.min_rain_value )
+                                                            p=pred_p_masked, 
+                                                            min_rain_value=self.min_rain_value,
+                                                            pred_sample=pred_sample #NOTE: sample should only be made during prediction step
+                                                             
+                                                              )
         
-        # loss.masked_fill_(loss.isnan(), 0)
-
-        # Logging
-        if self.debugging and step_name=='train' and pred_mu_masked.numel() != 0:
-            tblogger = self.trainer.logger.experiment
-            global_step = self.trainer.global_step
-        
-            tblogger.add_histogram('mu', pred_mu_masked, global_step=global_step)
-            tblogger.add_histogram('disp', pred_disp_masked, global_step=global_step)        
-            tblogger.add_histogram('p', pred_p_masked, global_step=global_step )
-
         if step_name in ['train','val']:
             return {'loss':loss, 'composite_losses':composite_losses, 'pred_metrics':pred_metrics }
 
@@ -275,25 +276,35 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop. It is independent of forward
         output = self.step(batch, "train")
+        if output is None:
+            return None
+        
         self.log("train_loss/loss",output['loss'])
 
         if output.get( 'composite_losses', None):
-            self.log("train_loss/norain",output['composite_losses']['loss_norain'])
-            self.log("train_loss/rain",output['composite_losses']['loss_rain'])
-        
-        if output.get( 'pred_metrics', None):
-            if output['pred_metrics']['pred_acc']: self.log("train_metric/acc",output['pred_metrics']['pred_acc'],  on_step=False, on_epoch=True )
-            if output['pred_metrics']['pred_rec']: self.log("train_metric/recall",output['pred_metrics']['pred_rec'], on_step=False, on_epoch=True )
-            if output['pred_metrics']['pred_mse']: self.log("train_metric/mse_rain",output['pred_metrics']['pred_mse'],  on_step=False, on_epoch=True )
-            if output['pred_metrics']['pred_r10mse']: 
-                if not torch.isnan( output['pred_metrics']['pred_r10mse'] ).any():
-                    self.log("train_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'] , on_step=False, on_epoch=True)
+            for k in output['composite_losses']:
+                self.log("train_loss/"+k, output['composite_losses'][k])
 
+
+        if output.get( 'pred_metrics', None):
+            # if output['pred_metrics']['acc']: self.log("train_metric/acc",output['pred_metrics']['acc'],  on_step=False, on_epoch=True )
+            # if output['pred_metrics']['rec']: self.log("train_metric/recall",output['pred_metrics']['rec'], on_step=False, on_epoch=True )
+            # if output['pred_metrics']['mse']: self.log("train_metric/mse_rain",output['pred_metrics']['mse'],  on_step=False, on_epoch=True )
+            # if output['pred_metrics']['r10mse']: 
+            #     if not torch.isnan( output['pred_metrics']['r10mse'] ).any():
+            #         self.log("train_metric/r10mse_rain",output['pred_metrics']['r10mse'] , on_step=False, on_epoch=True)
+            
+            for k in output['pred_metrics'].keys():
+                v = output['pred_metrics'][k]
+                if v is not None and not torch.isnan(v).any():
+                    self.log("train_metric/"+k, v, on_step=False, on_epoch=True)
 
         return output
     
     def validation_step(self, batch, batch_idx):
         output  = self.step(batch, "val")
+        if output is None:
+            return None
         output["val_loss/loss"] = output["loss"]
         self.log("val_loss/loss", output['loss'], prog_bar=True)
 
@@ -302,12 +313,17 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             self.log("val_loss/rain", output['composite_losses']['loss_rain'], on_step=False, on_epoch=True)
 
         if output.get( 'pred_metrics', None):
-            if output['pred_metrics']['pred_acc']: self.log("val_metric/acc",output['pred_metrics']['pred_acc'] , on_step=False, on_epoch=True)
-            if output['pred_metrics']['pred_rec']: self.log("val_metric/recall",output['pred_metrics']['pred_rec'] , on_step=False, on_epoch=True)
-            if output['pred_metrics']['pred_mse']: self.log("val_metric/mse_rain",output['pred_metrics']['pred_mse'],  on_step=False, on_epoch=True )
-            if output['pred_metrics']['pred_r10mse']: 
-                if not torch.isnan( output['pred_metrics']['pred_r10mse'] ).any():
-                    self.log("val_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'] , on_step=False, on_epoch=True)
+            # if output['pred_metrics']['acc']: self.log("val_metric/acc",output['pred_metrics']['acc'] , on_step=False, on_epoch=True)
+            # if output['pred_metrics']['rec']: self.log("val_metric/recall",output['pred_metrics']['rec'] , on_step=False, on_epoch=True)
+            # if output['pred_metrics']['mse']: self.log("val_metric/mse_rain",output['pred_metrics']['mse'],  on_step=False, on_epoch=True )
+            # if output['pred_metrics']['r10mse']: 
+            #     if not torch.isnan( output['pred_metrics']['r10mse'] ).any():
+            #         self.log("val_metric/r10mse_rain",output['pred_metrics']['r10mse'] , on_step=False, on_epoch=True)
+            for k in output['pred_metrics'].keys():
+                v = output['pred_metrics'][k]
+                if v is not None and not torch.isnan(v).any():
+                    self.log("train_metric/"+k, v, on_step=False, on_epoch=True)
+
         return output
 
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
@@ -325,7 +341,8 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
     def test_step(self, batch, batch_idx):
 
         output = self.step(batch, "test")
-
+        if output is None:
+            return None
         # Logging the aggregate loss during testing
         self.log("test_loss/loss", output['loss'])
 
@@ -337,12 +354,16 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
                 self.log("test_loss/rain", output['composite_losses']['loss_rain'], on_epoch=True, prog_bar=True)
 
         if output.get('pred_metrics', None):
-            if output['pred_metrics']['pred_acc']: self.log("test_metric/acc",output['pred_metrics']['pred_acc'] , on_step=False, on_epoch=True)
-            if output['pred_metrics']['pred_rec']: self.log("test_metric/recall",output['pred_metrics']['pred_rec'] , on_step=False, on_epoch=True)
-            if output['pred_metrics']['pred_mse']: self.log("test_metric/mse_rain",output['pred_metrics']['pred_mse'] , on_step=False, on_epoch=True )
-            if output['pred_metrics']['pred_r10mse']:
-                if not torch.isnan( output['pred_metrics']['pred_r10mse'] ).any().item():
-                    self.log("test_metric/r10mse_rain",output['pred_metrics']['pred_r10mse'], on_step=False, on_epoch=True, )
+            # if output['pred_metrics']['acc']: self.log("test_metric/acc",output['pred_metrics']['acc'] , on_step=False, on_epoch=True)
+            # if output['pred_metrics']['rec']: self.log("test_metric/recall",output['pred_metrics']['rec'] , on_step=False, on_epoch=True)
+            # if output['pred_metrics']['mse']: self.log("test_metric/mse_rain",output['pred_metrics']['mse'] , on_step=False, on_epoch=True )
+            # if output['pred_metrics']['r10mse']:
+            #     if not torch.isnan( output['pred_metrics']['r10mse'] ).any().item():
+            #         self.log("test_metric/r10mse_rain",output['pred_metrics']['r10mse'], on_step=False, on_epoch=True, )
+            for k in output['pred_metrics'].keys():
+                v = output['pred_metrics'][k]
+                if v is not None and not torch.isnan(v).any():
+                    self.log("train_metric/"+k, v, on_step=False, on_epoch=True)
 
         if self.task == "uk_rain": 
             output['li_locations'] = batch.pop('li_locations',None)
@@ -352,22 +373,30 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         output['pred_mu'] = output['pred_mu'].numpy().astype(np.float32)
         output['pred_disp'] = output['pred_disp'].numpy().astype(np.float32)
         output['pred_p'] = output['pred_p'].numpy().astype(np.float32)
-        output['target_did_rain'] = output['target_did_rain'].numpy().astype(np.float16)
-        output['target_rain_value'] = output['target_rain_value'].numpy().astype(np.float16)
-        output['idx_loc_in_region'] = output['idx_loc_in_region'].numpy().astype(np.float16)
+        output['target_did_rain'] = output['target_did_rain'].numpy().astype(np.float32)
+        output['target_rain_value'] = output['target_rain_value'].numpy().astype(np.float32)
+        output['idx_loc_in_region'] = output['idx_loc_in_region'].numpy().astype(np.float32)
         output['mask'] = output['mask'].numpy()
         
-        if output['pred_metrics']['pred_mse'] is not None:
-            output['pred_metrics']['pred_mse'] = output['pred_metrics']['pred_mse'].to('cpu').numpy().astype(np.float16)
         
-        if output['pred_metrics']['pred_rec'] is not None:
-            output['pred_metrics']['pred_rec'] = output['pred_metrics']['pred_rec'].to('cpu').numpy().astype(np.float16)
+        # if output['pred_metrics']['mse'] is not None:
+        #     output['pred_metrics']['mse'] = output['pred_metrics']['mse'].to('cpu').numpy().astype(np.float32)
         
-        if output['pred_metrics']['pred_acc'] is not None:
-            output['pred_metrics']['pred_acc'] = output['pred_metrics']['pred_acc'].to('cpu').numpy().astype(np.float16)
+        # if output['pred_metrics']['rec'] is not None:
+        #     output['pred_metrics']['rec'] = output['pred_metrics']['rec'].to('cpu').numpy().astype(np.float32)
         
-        if output['pred_metrics']['pred_r10mse'] is not None:
-            output['pred_metrics']['pred_r10mse'] = output['pred_metrics']['pred_r10mse'].to('cpu').numpy().astype(np.float16) if output['pred_metrics']['pred_r10mse'] else np.nan
+        # if output['pred_metrics']['acc'] is not None:
+        #     output['pred_metrics']['acc'] = output['pred_metrics']['acc'].to('cpu').numpy().astype(np.float32)
+        
+        # if output['pred_metrics']['r10mse'] is not None:
+        #     output['pred_metrics']['r10mse'] = output['pred_metrics']['r10mse'].to('cpu').numpy().astype(np.float32)
+        
+        # if output['pred_metrics'].get('crps') is not None:
+        #     output['pred_metrics']['crps'] = output['pred_metrics']['crps'].to('cpu').numpy().astype(np.float32)
+        
+        for k in output['pred_metrics'].keys():
+            v = output['pred_metrics'][k]
+            output['pred_metrics'][k] = v.to('cpu').numpy().astype(np.float32) if v is not None else None
         
         output.pop('composite_losses',None)
         output.pop('loss')
@@ -481,25 +510,35 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
         with open( file_path, "wb") as f:
             pickle.dump( dict_loc_data, f )
         
-        #TODO {rilwan.ade} clean up this implementation
+       # Stacking all predictions
         
-        try:    
-            test_mse =  np.stack( [output['pred_metrics'].pop('pred_mse')  for output in outputs if output['pred_metrics']['pred_mse'] ], axis=0 ).mean().squeeze().item()  
-        except Exception:
-            test_mse = np.nan
-        try:
-            test_r10mse =  np.nanmean(np.stack( [output['pred_metrics'].pop('pred_r10mse') for output in outputs if output['pred_metrics']['pred_r10mse']], axis=0 )).squeeze().item() 
-        except Exception:
-            test_r10mse = np.nan
-        try:    
-            test_acc = np.stack( [output['pred_metrics'].pop('pred_acc') for output in outputs if output['pred_metrics']['pred_acc']], axis=0 ).mean().squeeze().item()
-        except Exception:
-            test_acc = np.nan
+        # try:    
+        #     test_mse =  np.stack( [output['pred_metrics'].pop('mse')  for output in outputs if output['pred_metrics']['mse'] ], axis=0 ).mean().squeeze().item()  
+        # except Exception:
+        #     test_mse = np.nan
+        # try:
+        #     test_r10mse =  np.nanmean(np.stack( [output['pred_metrics'].pop('r10mse') for output in outputs if output['pred_metrics']['r10mse']], axis=0 )).squeeze().item() 
+        # except Exception:
+        #     test_r10mse = np.nan
+        # try:    
+        #     test_acc = np.stack( [output['pred_metrics'].pop('acc') for output in outputs if output['pred_metrics']['acc']], axis=0 ).mean().squeeze().item()
+        # except Exception:
+        #     test_acc = np.nan
         
-        try:
-            test_rec = np.stack( [output['pred_metrics'].pop('pred_rec') for output in outputs if output['pred_metrics']['pred_rec']], axis=0 ).mean().squeeze().item()
-        except Exception:
-            test_rec = np.nan
+        # try:
+        #     test_rec = np.stack( [output['pred_metrics'].pop('rec') for output in outputs if output['pred_metrics']['rec']], axis=0 ).mean().squeeze().item()
+        # except Exception:
+        #     test_rec = np.nan
+        
+        summary_metrics = {}
+        for k in next(outputs)['pred_metrics'].keys():
+            try:
+                metric = np.stack( [output['pred_metrics'].pop(k) for output in outputs if output['pred_metrics'][k]], axis=0 ).mean().squeeze().item()
+            except Exception:
+                metric = np.nan
+            summary_metrics['test_'+k] = metric
+            
+
             
         # Recording losses on test set and summarised information about test run
         summary = {
@@ -509,12 +548,13 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
             'val_end':dconfig.val_end,
             'test_start':dconfig.test_start,
             'test_end':dconfig.test_end,
-            'test_mse':  test_mse  ,
             
-            'test_r10mse':  test_r10mse,
-            'test_acc': test_acc,
-            'test_rec': test_rec ,
+            # 'test_mse':  test_mse  ,
+            # 'test_r10mse':  test_r10mse,
+            # 'test_acc': test_acc,
+            # 'test_rec': test_rec ,
         }
+        summary.update(summary_metrics)
 
         file_path_summary = os.path.join(dir_path, f"summary_{suffix}.json")
         with open(file_path_summary, "w") as f:
@@ -619,8 +659,9 @@ class NeuralDGLM(pl.LightningModule, GLMMixin):
 
         # Compound Poisson arguments
         parser.add_argument('--j_window_size',default=None, type=int, required=True)
-        parser.add_argument('--target_range',default=(0,4), type=tuple_type, required=True)
-
+        parser.add_argument('--target_range',default=(0,1), type=tuple_type, required=True)
+        parser.add_argument('--freeze_disp', default=None, type=int, required=False, help="If not None, freeze the dispersion parameter for the first n iterations")
+        parser.add_argument('--disp_init', default=0.001, type=float, required=False, help="The value to push the dispersion parameter to while freezing the dispersion parameter")
         # boolean flag for jensens approx
         parser.add_argument('--approx_method', default='gosper', type=str, choices=['gosper', 'jensen_gosper' ,'jensen_lanczos'], required=True )
         

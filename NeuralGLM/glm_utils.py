@@ -31,7 +31,6 @@ from typing import List, Dict
 from torch.nn import functional as F
 
 from torch.utils.data._utils.collate import np_str_obj_array_pattern, default_collate_err_msg_format, default_collate
-from torch._six import string_classes
 import collections
 
 #mu functions
@@ -96,6 +95,26 @@ class Log(torch.nn.Module):
         outp = torch.log(x)
         return outp
 
+# class AsymmetricSigmoid(nn.Module):
+#     def __init__(self, lb, ub, c):
+#         super(AsymmetricSigmoid, self).__init__()
+#         # self.lb = lb
+#         # self.ub = ub
+#         # self.c = c
+
+#         self.register_buffer('lb', torch.tensor([lb]))
+#         self.register_buffer('ub', torch.tensor([ub]))
+#         self.register_buffer('c', torch.tensor([c]))
+
+
+#     def forward(self, x):
+
+#         left = 
+
+
+#         y = torch.where(x < 0.0, left, right)
+#         return y
+
 MAP_LINK_INVFUNC = {
     'identity':torch.nn.Identity,
     'relu':torch.nn.ReLU,
@@ -120,11 +139,15 @@ MAP_LINK_INVFUNC = {
     'sigmoid_clamp_eps': torch.nn.Sequential( torch.nn.Sigmoid(), Clamp( lb=1e-6, ub=1-1e-6 ) ),
     'divn_sigmoid_clampeps_yshiftm': lambda factor, shift : torch.nn.Sequential( Multiply(1/factor), torch.nn.Sigmoid(), Clamp( lb=1e-1, ub=1-1e-1 ), Shift(shift) ), 
 
-    # Here the clamping is integrated into the output range which is [1.001, 1.999] for CP models
+    # Here the clamping is integrated into the output range which is [1.05, 1.95] for CP models
     'sigmoid_clampeps_shiftm': lambda eps, m : torch.nn.Sequential( torch.nn.Sigmoid(), Multiply(1-(2*eps)), Shift(eps), Shift(m) )     ,
 
     # Designed for the CP model to get mu starting at half the range
-    'scalem_shiftn_relu_clampeps':lambda shift, scale, eps: torch.nn.Sequential( Shift(shift), torch.nn.ReLU(), Multiply(scale) , Shift(eps) ),
+    'scalem_shiftn_relu_clampeps':lambda scale, shift, eps: torch.nn.Sequential( Multiply(scale), Shift(shift), torch.nn.ReLU()  , Shift(eps) ),
+
+        #v2 provides an upper and lower clamp through use of a sigmoid activation
+    'scalem_shiftn_relu_clampeps_v2':lambda scale, shift, lb, ub: torch.nn.Sequential( Multiply(scale), Shift(shift), torch.nn.ReLU(), Clamp( lb=lb, ub=ub ) )
+
 }
     
 # Maps the distribution name to a list of canonical/common inverse link functions. 
@@ -197,7 +220,7 @@ class GLMMixin:
             max = None
         
         elif distribution_name == "compound_poisson":
-            min = kwargs.get('eps',1e-3 )
+            min = None
             max = None
         
         return min, max
@@ -318,7 +341,7 @@ def default_collate_concat(batch):
         return torch.tensor(batch, dtype=torch.float64)
     elif isinstance(elem, int):
         return torch.tensor(batch)
-    elif isinstance(elem, string_classes):
+    elif isinstance(elem, str):
         return batch
         # return sum(batch, [ ])
     elif isinstance(elem, collections.abc.Mapping):
@@ -333,7 +356,7 @@ def default_collate_concat(batch):
         if not all(len(elem) == elem_size for elem in it):
             raise RuntimeError('each element in list of batch should be of equal size')
         
-        if type(elem) == list and (isinstance(next(iter(elem)), string_classes) or type(next(iter(elem))).__name__ == 'datetime') :
+        if type(elem) == list and (isinstance(next(iter(elem)), str) or type(next(iter(elem))).__name__ == 'datetime') :
             # return sum(batch, [])
             return batch
 

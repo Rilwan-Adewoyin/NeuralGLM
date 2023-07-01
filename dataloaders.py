@@ -13,14 +13,9 @@ import math
 import copy
 import os
 from sklearn.preprocessing import FunctionTransformer
-from torch._six import string_classes
-import ujson
-import pickle
 import regex  as re
 from typing import Tuple, Callable,  Union, Dict, List, TypeVar
 import argparse
-import json
-import ujson
 import xarray as xr
 from netCDF4 import Dataset as nDataset
 import itertools as it
@@ -29,7 +24,7 @@ from torch.utils.data.datapipes.iter.combinatorics import ShufflerIterDataPipe
 from torch.utils.data import IterableDataset
 import random
 from utils import tuple_type
-from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper
+# from torch.utils.data.datapipes.datapipe import _IterDataPipeSerializationWrapper
 from frozendict import frozendict
 from collections import OrderedDict
 from collections.abc import Collection, Mapping, Hashable
@@ -696,7 +691,7 @@ class Era5EobsDataset(IterableDataset):
     @staticmethod
     def locations_enc(li_locations, **kwargs):
         
-        if isinstance( li_locations[0], string_classes):
+        if isinstance( li_locations[0], str):
             # Use string shortening encoding method
             location_encoded = '_'.join([loc[:2] for loc in li_locations])
         
@@ -1277,7 +1272,7 @@ class Era5EobsDataset(IterableDataset):
             
             locations_ = li_hw_idxs_str
         
-        elif isinstance( locations[0], string_classes ):
+        elif isinstance( locations[0], str ):
             li_hw_idxs = [ self.rain_data.find_idx_of_loc_region( _loc, self.dconfig ) for _loc in locations ] #[ (h_idx,w_idx), ... ]
             #li_locs = np.repeat(locations, len(target) )
             locations_ = copy.deepcopy(locations)           
@@ -1395,8 +1390,8 @@ class Era5EobsDataset(IterableDataset):
             ds = worker_info.dataset.datapipe.iterable
         elif isinstance(worker_info.dataset, Era5EobsDataset ):
             ds = worker_info.dataset
-        elif isinstance(worker_info.dataset, _IterDataPipeSerializationWrapper ):
-            ds = worker_info.dataset._datapipe.datapipe.iterable
+        # elif isinstance(worker_info.dataset, _IterDataPipeSerializationWrapper ):
+        #     ds = worker_info.dataset._datapipe.datapipe.iterable
         else:
             raise ValueError
 

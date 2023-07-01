@@ -118,10 +118,10 @@ class LogNormalHurdleNLLLoss(_Loss):
     def prediction_metrics(self, rain, did_rain, mean, logits, **kwargs):
         if mean.numel() == 0:
             return {
-                'pred_acc':mean.new_tensor(0.0),
-                'pred_rec':mean.new_tensor(0.0),
-                'pred_mse':mean.new_tensor(0.0),
-                'pred_r10mse':mean.new_tensor(0.0)
+                'acc':mean.new_tensor(0.0),
+                'rec':mean.new_tensor(0.0),
+                'mse':mean.new_tensor(0.0),
+                'r10mse':mean.new_tensor(0.0)
 
             }
         #Classification losses
@@ -146,10 +146,10 @@ class LogNormalHurdleNLLLoss(_Loss):
 
         #MSE on days it did rain
         
-        pred_metrics = {'pred_acc': pred_acc.detach(),
-                        'pred_rec':pred_rec.detach(),
-                            'pred_mse': pred_mse.detach(),
-                            'pred_r10mse': pred_r10mse.detach()
+        pred_metrics = {'acc': pred_acc.detach(),
+                        'rec':pred_rec.detach(),
+                            'mse': pred_mse.detach(),
+                            'r10mse': pred_r10mse.detach()
  }
         return pred_metrics
 
@@ -258,10 +258,10 @@ class GammaHurdleNLLLoss(_Loss):
     def prediction_metrics(self, rain, did_rain, mean, logits, **kwargs):
         if mean.numel() == 0:
             return {
-                'pred_acc':None,
-                'pred_rec':None,
-                'pred_mse':None,
-                'pred_r10mse':None
+                'acc':None,
+                'rec':None,
+                'mse':None,
+                'r10mse':None
             }
 
         pred_rain_bool = torch.where( logits>=0.0, 1.0, 0.0)
@@ -287,10 +287,10 @@ class GammaHurdleNLLLoss(_Loss):
         else:
             pred_r10mse = None
 
-        pred_metrics = {'pred_acc': pred_acc,
-                            'pred_rec': pred_rec,
-                            'pred_mse': pred_mse,
-                            'pred_r10mse': pred_r10mse
+        pred_metrics = {'acc': pred_acc,
+                            'rec': pred_rec,
+                            'mse': pred_mse,
+                            'r10mse': pred_r10mse
 
                              }
         return pred_metrics
@@ -342,7 +342,12 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         self.register_buffer('j_window', torch.arange(start=-self.j_window_size+1, end=self.j_window_size, step=1, dtype=torch.float, requires_grad=False) )
 
         self.approx_method = kwargs.get('approx_method', 'gosper')
+
+        self.freeze_disp = kwargs.get('freeze_disp', None)
+        self.disp_init = kwargs.get('disp_init', 0.001)
         
+        self.CRPS = MQLoss( quantiles=[ np.linspace(0,1,0.05) ])
+
         # Check validity of reduction mode
         if self.reduction not in  ['none','mean','sum']:
             raise ValueError(self.reduction + " is not valid")
@@ -356,9 +361,17 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         outp = 0.5*torch.log(2*x + 1/3)  + 0.5*torch.log(self.pi) + x*torch.log(x) - x
         return outp
 
-    def nll_zero(self, mu, disp, p ):
-        #y=0
-        ll = -mu.pow(2-p) * disp.pow(-1) * (2-p).pow(-1)
+    def nll_zero(self, obs, mu, disp, p ):
+        
+        # Probability of zero is probability of Poisson(0) events occuring: exp(-lambda)
+        # However since we essentially include all unscaled rainfall values under 0.5mm as zero:
+        #  1) we need to include the a continuous approximation of the full pdf of the Poisson distribution e.g. ( lambda^x * exp(-lambda) / x! ) / We can use our gosper approximation for x! continuous 
+
+        lambda_ = mu.pow(2-p) * disp.pow(-1) * (2-p).pow(-1)
+
+        # ll = obs*torch.log(lambda_) + (-lambda_) - self.log_gosper_approx(obs)
+        ll = obs*torch.log(lambda_) + (-lambda_) - torch.lgamma(obs+1)
+
 
         # log_ll = (2-p)*torch.log(-mu) + -1*torch.log(disp) + -1*torch.log(2-p)
 
@@ -374,7 +387,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         # Poisson and Gamma params
         # lambda_ = l = mu.pow(2-p) / ( disp * (2-p) )
         alpha = a = (2-p) / (1-p)  #from the gamma distribution
-        # beta = b = mu.pow(p-1) / ( disp*(p-1) )
+        # gamma =  mu.pow(p-1) *  disp*(p-1) 
 
         # Tweedie Exponetial Dispersion Family params
         theta = mu.pow(1-p)/(1-p) #can be negative
@@ -535,13 +548,6 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             raise ValueError("disp has negative entry/entries") 
 
         # Clamping dispersion and p for stability
-        # disp = disp.clone()
-        # p = p.clone()
-        # with torch.no_grad():
-        #     if disp.numel()>0:
-        #         disp.clamp_(min=self.eps)
-        #         p.clamp_(min=1+self.eps, max=2-self.eps)
-
         if disp.numel()>0:
             disp = disp.clamp(min=self.eps)
             p = p.clamp(min=1+self.eps, max=2-self.eps)
@@ -552,7 +558,6 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         # Rainy days juded as 
         indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
         indices_non_rainydays = torch.where(did_rain.view( (1,-1))==0)
-
         
         # Gathering seperate tensors for days with and without rain
         rain_rainydays = rain.view((1,-1))[indices_rainydays]
@@ -566,7 +571,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         p_non_rainydays = p.view((1,-1))[indices_non_rainydays]
 
         # Calculating loss for non rainy days
-        loss_norain = self.nll_zero(mu=mu_non_rainydays, disp=disp_non_rainydays, p = p_non_rainydays  )
+        loss_norain = self.nll_zero(obs=rain_non_rainydays, mu=mu_non_rainydays, disp=disp_non_rainydays, p = p_non_rainydays  )
         
         # Calculating loss for rainy days
         loss_rain = self.nll_positive(obs= rain_rainydays, mu=mu_rainydays, disp=disp_rainydays, p=p_rainydays, global_step=kwargs.get('global_step') )
@@ -581,18 +586,32 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             loss_norain = loss_norain/count
             loss_rain = loss_rain/count
 
-            loss = loss_rain + loss_norain
-                    
-        return loss, {'loss_norain':loss_norain.detach() , 'loss_rain':loss_rain.detach()}
+        loss = loss_rain + loss_norain
+
+        dict_losses = {'norain':loss_norain.detach(), 'rain':loss_rain.detach()}
+
+        # Freeze dispersion for the first epochs - produce gradients to centre disp on 0.001
+        if self.freeze_disp and kwargs['global_step'] < self.freeze_disp:
+            disp_freezing_loss = 0.01*torch.nn.functional.mse_loss(disp, torch.full_like(disp, fill_value=kwargs.get('disp_init', 0.001)), reduction='none').sum()
+
+            if self.reduction == 'mean':
+                disp_freezing_loss = disp_freezing_loss/count
+            
+            loss = loss + disp_freezing_loss
+            
+            dict_losses['disp_freezing'] = disp_freezing_loss.detach()
+
+        return loss, dict_losses
 
     def prediction_metrics(self, rain, did_rain, mean, min_rain_value, **kwargs):
 
         if mean.numel() == 0:
             return {
-                'pred_acc':mean.new_tensor(0.0),
-                'pred_rec':mean.new_tensor(0.0),
-                'pred_mse':mean.new_tensor(0.0),
-                'pred_r10mse':mean.new_tensor(0.0)
+                'acc':mean.new_tensor(0.0),
+                'rec':mean.new_tensor(0.0),
+                'mse':mean.new_tensor(0.0),
+                'r10mse':mean.new_tensor(0.0),
+                'crps':mean.new_tensor(0.0),
             }
             
         pred_rain_bool = torch.where( mean>min_rain_value, mean.new_tensor(1.0), mean.new_tensor(0.0))
@@ -602,7 +621,6 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         
         indices_rainydays = torch.where(did_rain.view( (1,-1))>0)
 
-        # Note: we unscale the value prior to caluclating mse to allow for comparison between models
         pred_mse = torch.nn.functional.mse_loss(
             mean.view((1,-1))[indices_rainydays],
             rain.view((1,-1))[indices_rainydays]
@@ -613,13 +631,16 @@ class CompoundPoissonGammaNLLLoss(_Loss):
             mean.view((1,-1))[indices_r10days],
             rain.view((1,-1))[indices_r10days]
         )
-
-        
-        pred_metrics = {'pred_acc': pred_acc.detach(),
-                            'pred_rec': pred_rec.detach(),
-                            'pred_mse': pred_mse.detach(),
-                            'pred_r10mse': pred_r10mse.detach()
+       
+        pred_metrics = {'acc': pred_acc.detach(),
+                            'rec': pred_rec.detach(),
+                            'mse': pred_mse.detach(),
+                            'r10mse': pred_r10mse.detach(),
                              }
+        if 'pred_sample' in kwargs.get('pred_sample') is not None:
+            crps = self.CRPS(y=rain, y_hat=kwargs.get('pred_sample') )
+            pred_metrics['crps'] = crps.detach()
+                
         return pred_metrics
     
 # Wasserstein, CRPS,MSE

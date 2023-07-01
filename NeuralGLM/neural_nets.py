@@ -19,7 +19,6 @@ from typing import Tuple
 import argparse
 from torch.nn import Parameter
 import math
-#python3 -m pip install git+https://github.com/keitakurita/Better_LSTM_PyTorch.git
 #python3 -m pip install git+https://github.com/Rilwan-A/Better_LSTM_PyTorch.git
 
 class HLSTM(nn.Module):
@@ -296,7 +295,6 @@ class TemporalDownScaleAttention(nn.Module):
 
         return outp
 
-
 class HConvLSTM_tdscale(nn.Module):
     
     model_type = "HConvLSTM_tdscale"
@@ -306,7 +304,8 @@ class HConvLSTM_tdscale(nn.Module):
                     output_shape=(2,),
                     hidden_dim:int=64,
                     lstm_cell_kernel_size:Tuple=(1,1),
-                    num_layers:int=2, 
+                    num_layers:int=4, 
+                    num_layers_heads:int=2,
                     dropout:float=0.1,
 
                     dropoutw:float=0.35,
@@ -344,6 +343,8 @@ class HConvLSTM_tdscale(nn.Module):
         self.zero_inflated_model = zero_inflated_model
         self.tfactor = tfactor
 
+        self.detach_grads_for_disp = False
+
         self.upscale = nn.Conv2d( in_channels=self.input_shape,
                                     out_channels=self.hidden_dim,
                                     kernel_size=(lstm_cell_kernel_size,lstm_cell_kernel_size),
@@ -375,18 +376,29 @@ class HConvLSTM_tdscale(nn.Module):
                                                                 dropout_qk=dropout_qk,
                                                                 dropout_v=dropout_v,
                                                                 heads=heads)
-        self.outp_mu = nn.Sequential( 
-                            nn.Conv2d( in_channels=hidden_dim,
-                                        out_channels=(self.output_shape+self.input_shape)//2,
-                                        kernel_size=3,
-                                        padding='same',
-                                        bias=True), 
-                            nn.GELU(),
-                            nn.Conv2d( in_channels=(self.output_shape+self.input_shape)//2,
-                                        out_channels=self.output_shape,
-                                        kernel_size=1
-                                        ,bias=False)                              
-                                         )
+        
+        self.outp_mu = nn.Sequential(
+                                        nn.Conv2d( in_channels=hidden_dim,
+                                            out_channels=(self.output_shape+self.input_shape)//2,
+                                            kernel_size=3,
+                                            padding='same',
+                                            bias=True),
+                                            nn.GELU()
+                                        *[nn.Sequential(
+                                            nn.Conv2d(
+                                                in_channels=hidden_dim,
+                                                out_channels=(self.output_shape+self.input_shape)//2,
+                                                kernel_size=1,
+                                                padding=0,
+                                                bias=False),
+                                            nn.GELU()) for _ in range(num_layers_heads-2)
+                                        ],
+                                        nn.Conv2d( in_channels=(self.output_shape+self.input_shape)//2,
+                                            out_channels=self.output_shape,
+                                            kernel_size=1
+                                            ,bias=False)  
+        )
+        
 
         self.outp_dispersion_tdscale = TemporalConvDownScaleAttention( tfactor=tfactor,
                                                                 in_channels=self.hidden_dim, 
@@ -395,18 +407,28 @@ class HConvLSTM_tdscale(nn.Module):
                                                                 dropout_qk=dropout_qk,
                                                                 dropout_v=dropout_v,
                                                                 heads=heads)
-        self.outp_dispersion = nn.Sequential( 
-                            nn.Conv2d( in_channels=hidden_dim,
-                                        out_channels=(self.output_shape+self.input_shape)//2,
-                                        kernel_size=3,
-                                        padding='same',
-                                        bias=True), 
-                            nn.GELU(),
-                            nn.Conv2d( in_channels=(self.output_shape+self.input_shape)//2,
-                                        out_channels=self.output_shape,
-                                        kernel_size=1,
-                                        bias=False)                              
-                                         )
+
+        self.outp_dispersion = nn.Sequential(
+                                        nn.Conv2d( in_channels=hidden_dim,
+                                            out_channels=(self.output_shape+self.input_shape)//2,
+                                            kernel_size=3,
+                                            padding='same',
+                                            bias=True),
+                                            nn.GELU()
+                                        *[nn.Sequential(
+                                            nn.Conv2d(
+                                                in_channels=hidden_dim,
+                                                out_channels=(self.output_shape+self.input_shape)//2,
+                                                kernel_size=1,
+                                                padding=0,
+                                                bias=False),
+                                            nn.GELU()) for _ in range(num_layers_heads-2)
+                                        ],
+                                        nn.Conv2d( in_channels=(self.output_shape+self.input_shape)//2,
+                                            out_channels=self.output_shape,
+                                            kernel_size=1
+                                            ,bias=False)  
+        )
 
         self.out_p_tdscale = TemporalConvDownScaleAttention( tfactor=tfactor,
                                                             in_channels=self.hidden_dim, 
@@ -415,21 +437,30 @@ class HConvLSTM_tdscale(nn.Module):
                                                             dropout_qk=dropout_qk,
                                                             dropout_v=dropout_v,
                                                             heads=heads)
-        self.outp_logitsrain = nn.Sequential( 
-                        nn.Conv2d( in_channels=hidden_dim,
-                                    out_channels=(self.output_shape+self.input_shape)//2,
-                                    kernel_size=3,
-                                    padding='same',
-                                    bias=False), 
-                        nn.GELU(),
-                        nn.Conv2d( in_channels=(self.output_shape+self.input_shape)//2,
-                                    out_channels=self.output_shape,
-                                    kernel_size=1,
-                                    bias=False)          
-                                        )
-            
+        
+        self.outp_logitsrain = nn.Sequential(
+                                        nn.Conv2d( in_channels=hidden_dim,
+                                            out_channels=(self.output_shape+self.input_shape)//2,
+                                            kernel_size=3,
+                                            padding='same',
+                                            bias=True),
+                                            nn.GELU()
+                                        *[nn.Sequential(
+                                            nn.Conv2d(
+                                                in_channels=hidden_dim,
+                                                out_channels=(self.output_shape+self.input_shape)//2,
+                                                kernel_size=1,
+                                                padding=0,
+                                                bias=False),
+                                            nn.GELU()) for _ in range(num_layers_heads-2)
+                                        ],
+                                        nn.Conv2d( in_channels=(self.output_shape+self.input_shape)//2,
+                                            out_channels=self.output_shape,
+                                            kernel_size=1
+                                            ,bias=False)  
+        )
 
-    def forward(self, x, standardized_output=True):
+    def forward(self, x):
         b, t, _, _, _ = x.shape
         x = einops.rearrange(x, 'b t h w c -> (b t) c h w')
         x = self.upscale(x)
@@ -446,7 +477,11 @@ class HConvLSTM_tdscale(nn.Module):
         hm = rearng( hm, 'b t ... -> (b t) ...')
         output['mu'] = rearng( self.outp_mu(hm), '(b t) c1 ... -> b (t c1) ...', b=b, t=t//self.tfactor)
 
-        hd = self.outp_dispersion_tdscale(h).squeeze(2)
+        # Stop gradients related to dispersion from flowing back to the encoder while we fix the dispersion output to disp_init
+        if self.detach_grads_for_disp is True:
+            hd = self.outp_dispersion_tdscale(h.detach()).squeeze(2)
+        else:
+            hd = self.outp_dispersion_tdscale(h).squeeze(2)
         hd = rearng( hd, 'b t ... -> (b t) ...')
         output['disp'] = rearng( self.outp_dispersion(hd), '(b t) c1 ... -> b (t c1) ...', b=b, t=t//self.tfactor)
 
@@ -460,6 +495,7 @@ class HConvLSTM_tdscale(nn.Module):
     def parse_model_args(parent_parser=None, list_args=None):
         parser = argparse.ArgumentParser(parents=[parent_parser] if parent_parser else None, add_help=True, allow_abbrev=False)
         parser.add_argument("--num_layers", default=4, type=int)
+        parser.add_argument("--num_layers_heads", default=2, type=int)
         parser.add_argument("--hidden_dim", default=64, type=int)
         parser.add_argument("--dropoutw", default=0.35, type=float)
         parser.add_argument("--dropout_qk", default=0.15, type=float)

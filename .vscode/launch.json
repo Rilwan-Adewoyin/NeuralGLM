@@ -24,61 +24,82 @@
             "console": "integratedTerminal",
             "cwd": "/home/akann1w0w1ck/NeuralGLM",
             "env":{
-                "CUDA_VISIBLE_DEVICES":"1",
+                "CUDA_VISIBLE_DEVICES":"0",
                 "PYTHONPATH": "${workspaceFolder}:${env:PYTHONPATH}"
                 
             },
             "args": [
-                "--exp_name", "debugging",
-
+                "--exp_name", "20y_20y",
 
                 "--target_range", "0,1",
 
+                "--batch_size", "112",
+                "--batch_size_test", "1080",
+                
+                "--dropoutw", "0.05",
+                "--dropout_qk", "0.05",
+                "--dropout_v", "0.05",
+
+                "--dropouto", "0.05",
+                "--dropouti", "0.05",
+
                 "--mu_link_name", "scalem_shiftn_relu_clampeps",
-                "--mu_params", "1.0,0.3,0.001",
+                "--mu_params", "1.0,0.003,0.0001",
+                "--pos_weight", "1.2",
 
                 "--dispersion_distribution_name", "uniform_positive",
-                "--dispersion_link_name", "scalem_shiftn_relu_clampeps",
-                // "--disp_params", "0.5,6.0",
-                "--disp_params", "1.0,0.18,0.025",
+                "--dispersion_link_name", "scalem_shiftn_relu_clampeps_v2",
+                "--disp_params", "1.0,0.0005,0.00005, 1.0",
 
                 "--p_link_name", "sigmoid_clampeps_shiftm",
                 "--p_params", "0.05,1.0",
 
-                "--j_window_size", "12",
+                "--j_window_size", "24",
                 "--approx_method", "gosper", 
+
+                "--freeze_disp","1000",
+                "--disp_init","0.0001",
+
+                // "--num_layers_heads", "3",
+
                 // "--approx_method", "jensen_gosper", 
                 // "--approx_method", "jensen_lanczos", 
                 
-
                 // "--test_version","0",
-
-
                 "--train_start","1979",
-                "--train_end","1979-01-29",                
+                "--train_end","1979-04-29",                
                 "--val_start","1979",
-                "--val_end","1979-01-29",
+                "--val_end","1979-04-29",
                 "--test_start","1979",
-                "--test_end","1979-01-29",
+                "--test_end","1979-04-29",
+
+                // "--train_start","1979",
+                // "--train_end","1995-03",                
+                // "--val_start","1995-03",
+                // "--val_end","1999-07",
+                // "--test_start","1999-07",
+                // "--test_end","2019-07",
 
                 "--max_epochs", "200",
-                "--patience", "30",
+                "--patience", "5",
+                "--val_check_interval", "0.4",
+                "--limit_val_batches", "0.4",
 
                 // "--test_end","1988-12",
                 "--locations", "All",
                 "--locations_test", "All",
                 "--target_distribution_name","compound_poisson",
                 
-                "--workers", "8",          
+                "--workers", "12",          
 
                 "--devices","1",
 
-                "--debugging",
-                "--shuffle","0",
+                // "--debugging",
+                // "--shuffle","0",
                 
                 "--learning_rate", "0.001",
-                "--beta1", "0.8",
-                "--beta2", "0.85",
+                "--beta1", "0.6",
+                "--beta2", "0.999",
                 "--eps", "1e-8",
                 "--weight_decay", "0.00001",
 

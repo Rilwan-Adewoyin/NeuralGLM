@@ -133,12 +133,9 @@ class GammaHurdle():
     support = constraints.positive
     has_rsample = True
 
-    def __init__(self, mu=2.0, disp=0.2, prob=0.5, validate_args=None):
+    def __init__(self, ):
         
-        mu = torch.as_tensor(mu)
-        disp = torch.as_tensor(disp)
-
-        self.set_parameters(mu, disp, prob, validate_args)
+        pass
 
     def set_parameters(self, mu, disp, prob, validate_args=None):
         if not hasattr(self, 'bernoulli_dist') or not self.bernoulli_dist.probs.equal( prob).all():
@@ -149,11 +146,17 @@ class GammaHurdle():
         if not hasattr(self, 'gamma_dist') or not self.gamma_dist.base_dist.loc.equal( alpha ).all() or not self.lognormal_dist.base_dist.scale.equal( beta ).all() :
             self.gamma_dist = Gamma(alpha, beta, validate_args=validate_args)
             
-    def sample(self,sample_size=(1,)):
+    def sample(self, mu=2.0, disp=0.2, prob=0.5, sample_size=(1,)):
+        
+        mu = torch.as_tensor(mu)
+        disp = torch.as_tensor(disp)
+
+        self.set_parameters(mu, disp, prob)
+
         
         rain_prob = self.bernoulli_dist.sample( sample_size )
 
-        sampled_rain = torch.where(rain_prob>=0.5, self.gamma_dist.sample( (1,) ), 0  )
+        sampled_rain = torch.where(rain_prob>=0.5, self.gamma_dist.sample( sample_size) , 0.0  )
 
         return sampled_rain
 
@@ -223,20 +226,27 @@ class CompoundPoisson():
     support = constraints.positive
     has_rsample = True
 
-    def __init__(self, mu=1.0, disp=1.0, p=1.5, validate_args=None):
+    def __init__(self,  validate_args=None):
+        pass
 
-        lambda_, alpha, beta = self.reparameterize( torch.as_tensor(mu), 
+    
+    def sample(self, mu=1.0, disp=1.0, p=1.5, sample_size=(1,)):
+
+        lambda_, alpha, gamma = self.reparameterize( torch.as_tensor(mu), 
                                                     torch.as_tensor(disp),
                                                     torch.as_tensor(p) )
         
-        self.poisson_dist = Poisson(lambda_, validate_args=validate_args)
-        self.gamma_dist = Gamma(alpha, beta, validate_args=validate_args)
+        # poisson_dist = Poisson(lambda_,)
+        gamma_dist = Gamma(alpha, 1/gamma) #pytorch gamma takes the concentration \alpha and rate \beta parameterization
 
-    def sample(self,sample_size=(1,)):
+        # N = poisson_dist.sample( sample_size )
 
-        N = self.poisson_dist.sample( sample_size )
-        li_gammas = [ self.gamma_dist.sample( sample_size ) for i in torch.arange(N)]
+        N = torch.poisson( lambda_ )
+
+        li_gammas = [ gamma_dist.sample( sample_size ) for i in torch.arange(N)]
         rain = torch.stack( li_gammas, dim=0).sum(dim=0)
+
+        rain = torch.where( rain>0.5, rain, rain.new_tensor(0.0) )
 
         return rain
 
@@ -268,26 +278,27 @@ class CompoundPoisson():
         # Convert from ED form to standard form
 
         lambda_ = mu.pow(2-p) * ( disp*(2-p) ).pow(-1)
-        alpha = disp*(p-1)*mu.pow(p-1)
-        beta = (2-p)/(p-1)
+        alpha = - ( (2-p)/(1-p) )
+        gamma = disp*(p-1)*mu.pow(p-1)
 
-        return lambda_, alpha, beta
+        return lambda_, alpha, gamma
     
     @classmethod
     def get_mean(cls, mu, disp, p):
+        # NOTE: Need better logic here -> What
         if isinstance(mu, torch.Tensor):
-            mu = torch.where(mu>1.0, mu, mu.new_tensor(0.0))
+            mu = torch.where(mu>0.5, mu, mu.new_tensor(0.0))
         elif isinstance(mu, np.ndarray):
-            mu = np.where(mu>1.0, mu, 0.0)
+            mu = np.where(mu>0.5, mu, 0.0)
         return mu
 
     @classmethod
     def get_variance(self, mu, disp, p):
         if isinstance(mu, torch.Tensor):
-            var = torch.where( mu>1.0, disp * mu.pow(p), mu.new_tensor(0.0))
+            var = torch.where( mu>0.5, disp * mu.pow(p), mu.new_tensor(0.0))
 
         elif isinstance(mu, np.ndarray):
-            var = np.where( mu>1.0, disp * np.power(mu, p), 0.0)
+            var = np.where( mu>0.5, disp * np.power(mu, p), 0.0)
         
         return var
     

@@ -9,6 +9,10 @@ if _OMEGACONF_AVAILABLE:
     from omegaconf.errors import UnsupportedValueType, ValidationError
 import pytorch_lightning as pl
 import regex as re
+from typing import Any
+from datetime import datetime
+import numpy as np
+import yaml
 
 def load_hparams_from_yaml(config_yaml: str, use_omegaconf: bool = True) -> Dict[str, Any]:
     """Load hparams from a file.
@@ -93,3 +97,18 @@ def tuple_type(strings):
         mapped = mapped_int
 
     return tuple(mapped)
+
+def preprocess_hparams(value: Any) -> Any:
+    """
+    Preprocess an object to make it serializable to YAML in a nicely formatted way.
+    """
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    elif isinstance(value, datetime):
+        return value.isoformat()
+    elif isinstance(value, np.generic):
+        return np.asscalar(value)
+    elif isinstance(value, argparse.Namespace):
+        return vars(value) # Convert Namespace object to dictionary
+    else:
+        return value
