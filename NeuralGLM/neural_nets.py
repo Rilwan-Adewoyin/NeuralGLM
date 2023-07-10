@@ -383,7 +383,7 @@ class HConvLSTM_tdscale(nn.Module):
                                             kernel_size=3,
                                             padding='same',
                                             bias=True),
-                                            nn.GELU()
+                                            nn.GELU(),
                                         *[nn.Sequential(
                                             nn.Conv2d(
                                                 in_channels=hidden_dim,
@@ -414,7 +414,7 @@ class HConvLSTM_tdscale(nn.Module):
                                             kernel_size=3,
                                             padding='same',
                                             bias=True),
-                                            nn.GELU()
+                                            nn.GELU(),
                                         *[nn.Sequential(
                                             nn.Conv2d(
                                                 in_channels=hidden_dim,
@@ -444,7 +444,7 @@ class HConvLSTM_tdscale(nn.Module):
                                             kernel_size=3,
                                             padding='same',
                                             bias=True),
-                                            nn.GELU()
+                                            nn.GELU(),
                                         *[nn.Sequential(
                                             nn.Conv2d(
                                                 in_channels=hidden_dim,

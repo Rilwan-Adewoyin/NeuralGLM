@@ -29,11 +29,13 @@
                 
             },
             "args": [
-                "--exp_name", "20y_20y",
+                "--exp_name", "debugging",
 
                 "--target_range", "0,1",
 
-                "--batch_size", "112",
+                // "--batch_size", "112",
+                "--batch_size", "32",
+
                 "--batch_size_test", "1080",
                 
                 "--dropoutw", "0.05",
@@ -44,12 +46,12 @@
                 "--dropouti", "0.05",
 
                 "--mu_link_name", "scalem_shiftn_relu_clampeps",
-                "--mu_params", "1.0,0.003,0.0001",
+                "--mu_params", "0.1,0.003,0.0001",
                 "--pos_weight", "1.2",
 
                 "--dispersion_distribution_name", "uniform_positive",
                 "--dispersion_link_name", "scalem_shiftn_relu_clampeps_v2",
-                "--disp_params", "1.0,0.0005,0.00005, 1.0",
+                "--disp_params", "0.05,0.0005,0.00005,1.0",
 
                 "--p_link_name", "sigmoid_clampeps_shiftm",
                 "--p_params", "0.05,1.0",
@@ -57,7 +59,7 @@
                 "--j_window_size", "24",
                 "--approx_method", "gosper", 
 
-                "--freeze_disp","1000",
+                "--freeze_disp","100",
                 "--disp_init","0.0001",
 
                 // "--num_layers_heads", "3",
@@ -80,10 +82,15 @@
                 // "--test_start","1999-07",
                 // "--test_end","2019-07",
 
-                "--max_epochs", "200",
+                // "--max_epochs", "200",
+                "--max_epochs", "2",
+
                 "--patience", "5",
-                "--val_check_interval", "0.4",
-                "--limit_val_batches", "0.4",
+                // "--val_check_interval", "0.4",
+                // "--limit_val_batches", "0.4",
+
+                "--val_check_interval", "1.0",
+                "--limit_val_batches", "1.0",
 
                 // "--test_end","1988-12",
                 "--locations", "All",

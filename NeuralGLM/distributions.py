@@ -138,25 +138,28 @@ class GammaHurdle():
         pass
 
     def set_parameters(self, mu, disp, prob, validate_args=None):
-        if not hasattr(self, 'bernoulli_dist') or not self.bernoulli_dist.probs.equal( prob).all():
-            self.bernoulli_dist = Bernoulli(prob, validate_args=validate_args)
+        
+        self.bernoulli_dist = Bernoulli(prob, validate_args=validate_args)
         
         alpha, beta, prob = self.reparameterize( mu, disp, prob )
 
-        if not hasattr(self, 'gamma_dist') or not self.gamma_dist.base_dist.loc.equal( alpha ).all() or not self.lognormal_dist.base_dist.scale.equal( beta ).all() :
-            self.gamma_dist = Gamma(alpha, beta, validate_args=validate_args)
+        self.gamma_dist = Gamma(alpha, beta, validate_args=validate_args)
             
     def sample(self, mu=2.0, disp=0.2, prob=0.5, sample_size=(1,)):
-        
+
+        mu, disp, p = map(torch.as_tensor, [mu, disp, p])
+        assert mu.shape == disp.shape == p.shape, "mu, disp, and p must have the same shape"
+
+
+        # Getting Gamma distr
         mu = torch.as_tensor(mu)
         disp = torch.as_tensor(disp)
-
-        self.set_parameters(mu, disp, prob)
-
+        alpha, beta, prob = self.reparameterize( mu, disp, prob )
+        gamma_dist = Gamma(alpha, beta)
         
-        rain_prob = self.bernoulli_dist.sample( sample_size )
+        bool_rain = torch.bernoulli(prob).sample( sample_size )
 
-        sampled_rain = torch.where(rain_prob>=0.5, self.gamma_dist.sample( sample_size) , 0.0  )
+        sampled_rain = torch.where(bool_rain==1.0, gamma_dist.sample(sample_size), 0.0  )
 
         return sampled_rain
 
@@ -230,25 +233,82 @@ class CompoundPoisson():
         pass
 
     
-    def sample(self, mu=1.0, disp=1.0, p=1.5, sample_size=(1,)):
+    # def sample(self, mu=1.0, disp=1.0, p=1.5, sample_size=(1,)):
 
-        lambda_, alpha, gamma = self.reparameterize( torch.as_tensor(mu), 
-                                                    torch.as_tensor(disp),
-                                                    torch.as_tensor(p) )
+    #     mu, disp, p = map(torch.as_tensor, [mu, disp, p])
+    #     assert mu.shape == disp.shape == p.shape, "mu, disp, and p must have the same shape"
+
+
+    #     lambda_, alpha, gamma = self.reparameterize( torch.as_tensor(mu), 
+    #                                                 torch.as_tensor(disp),
+    #                                                 torch.as_tensor(p) )
         
-        # poisson_dist = Poisson(lambda_,)
-        gamma_dist = Gamma(alpha, 1/gamma) #pytorch gamma takes the concentration \alpha and rate \beta parameterization
+    #     # poisson_dist = Poisson(lambda_,)
+    #     gamma_dist = Gamma(alpha, 1/gamma) #pytorch gamma takes the concentration \alpha and rate \beta parameterization
 
-        # N = poisson_dist.sample( sample_size )
+    #     # N = poisson_dist.sample( sample_size )
 
-        N = torch.poisson( lambda_ )
+    #     N = torch.poisson( lambda_ ) # (mu.shape[0], )
 
-        li_gammas = [ gamma_dist.sample( sample_size ) for i in torch.arange(N)]
-        rain = torch.stack( li_gammas, dim=0).sum(dim=0)
+    #     # Sample (N.max(), sample_size) gamma distributed random variables
+    #     n = int(N.max().item())
+    #     gammas = gamma_dist.sample( ( n, *sample_size) ) # (N.max(), sample_size)
+        
+    #     # Create a mask that will be used to zero out the gammas that are not needed
+    #     mask = torch.arange(n).unsqueeze(1) < N.unsqueeze(0) # (n, sample_size)
+    #     rain = gammas * mask # (n, sample_size)
 
-        rain = torch.where( rain>0.5, rain, rain.new_tensor(0.0) )
+    #     rain = rain.sum(dim=0) # (sample_size, )
 
-        return rain
+    #     rain = torch.where( rain>0.5, rain, rain.new_tensor(0.0) ) # (sample_size, )
+
+    #     return rain
+
+    def sample(self, mu=1.0, disp=1.0, p=1.5, sample_size=500, batch_size=100 ):
+
+        mu, disp, p = map(torch.as_tensor, [mu, disp, p])
+        assert mu.shape == disp.shape == p.shape, "mu, disp, and p must have the same shape"
+
+
+        # Initialize list to store results
+        result = []
+
+        # Iterate over batches
+        for i in range(0, len(mu), batch_size):
+
+            # Extract batch data
+            mu_batch = mu[i:i+batch_size]
+            disp_batch = disp[i:i+batch_size]
+            p_batch = p[i:i+batch_size]
+
+            # Reparameterize
+            lambda_, alpha, gamma = self.reparameterize(mu_batch, disp_batch, p_batch)
+
+            # Create Gamma distribution
+            gamma_dist = Gamma(alpha, 1/gamma) #pytorch gamma takes the concentration \alpha and rate \beta parameterization
+
+            # Sample from Poisson distribution
+            N = torch.poisson(lambda_) # (mu.shape[0], )
+
+            # Sample (N.max(), sample_size) gamma distributed random variables
+            n = int(N.max().item()) # poisson events
+            gammas = gamma_dist.sample((n, sample_size)) # (n, sample_size, batch_size)
+
+            # Create a mask that will be used to zero out the gammas that are not needed
+            mask = torch.arange(n,device=N.device)[:, None, None] < N[None,None,:] # (n, 1, batch_size)
+            rain = gammas * mask # (n, sample_size, batch_size)
+
+            rain = rain.sum(dim=0) # (sample_size, batch_size)
+
+            rain = torch.where(rain>0.5, rain, rain.new_tensor(0.0)) # (sample_size, )
+
+            # Add batch result to list
+            result.append(rain)
+
+        # Concatenate batch results
+        result = torch.cat(result, dim=1)
+        result = result.permute(1,0)
+        return result
 
     def unscale_distribution( self, mu: Union[Tensor, np.ndarray], disp, 
                             p, 

@@ -15,6 +15,7 @@ from torch import Tensor
 from typing import Callable, Optional
 import math
 import numpy as np
+from neuralforecast.losses.pytorch import MQLoss
 
 # Distributional Losses Torch Classes
 class LogNormalHurdleNLLLoss(_Loss):
@@ -346,7 +347,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
         self.freeze_disp = kwargs.get('freeze_disp', None)
         self.disp_init = kwargs.get('disp_init', 0.001)
         
-        self.CRPS = MQLoss( quantiles=[ np.linspace(0,1,0.05) ])
+        self.CRPS = MQLoss(quantiles=np.linspace(0.05,0.95,19))
 
         # Check validity of reduction mode
         if self.reduction not in  ['none','mean','sum']:
@@ -592,7 +593,7 @@ class CompoundPoissonGammaNLLLoss(_Loss):
 
         # Freeze dispersion for the first epochs - produce gradients to centre disp on 0.001
         if self.freeze_disp and kwargs['global_step'] < self.freeze_disp:
-            disp_freezing_loss = 0.01*torch.nn.functional.mse_loss(disp, torch.full_like(disp, fill_value=kwargs.get('disp_init', 0.001)), reduction='none').sum()
+            disp_freezing_loss = 100*torch.nn.functional.mse_loss(disp, torch.full_like(disp, fill_value=kwargs.get('disp_init', 0.001)), reduction='none').sum()
 
             if self.reduction == 'mean':
                 disp_freezing_loss = disp_freezing_loss/count
@@ -637,11 +638,21 @@ class CompoundPoissonGammaNLLLoss(_Loss):
                             'mse': pred_mse.detach(),
                             'r10mse': pred_r10mse.detach(),
                              }
-        if 'pred_sample' in kwargs.get('pred_sample') is not None:
-            crps = self.CRPS(y=rain, y_hat=kwargs.get('pred_sample') )
-            pred_metrics['crps'] = crps.detach()
-                
-        return pred_metrics
+        if kwargs.get('pred_sample',None) is not None:
+            pred_sample = kwargs.get('pred_sample')         
+
+            # Initialize list to store results
+            result = []
+
+            # Iterate over indices
+            for i in range(len(rain)):
+                crps = self.CRPS(y=rain[i], y_hat=pred_sample[i])
+                result.append(crps.detach())
+
+            # Concatenate results
+            pred_metrics['crps'] = torch.stack(result)
+                    
+            return pred_metrics
     
 # Wasserstein, CRPS,MSE
 
